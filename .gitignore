@@ -1,0 +1,56 @@
+# Environment
+.env
+.obsidian
+venv/
+
+# Config files
+*.toml
+
+# Video downloads
+downloads/
+*.webm
+*.mp4
+
+# Audio
+audio/
+*.wav
+*.flac
+
+# Transcripts
+transcripts*
+normalized*
+*.vtt
+*.txt
+
+# Summaries
+summary*
+*.md
+*.yaml
+
+# Check files
+.downloaded
+.converted
+.vtt_hashes_medium
+
+# Allow requirements.txt
+!requirements.txt
+
+# Experimental
+embed*
+interface*
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Thanks mac
+.DS_Store
+
+# Code editors
+.idea
+.store
+.vscode
+
+# Local items with scratch in the name
+*scratch*
