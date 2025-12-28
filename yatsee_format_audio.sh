@@ -25,7 +25,7 @@ audio_dir='./audio'
 id_tracker="${audio_dir}/.converted"
 
 # Determine output format from first argument or default to flac
-output_format="${1:-wav}"
+output_format="${1:-flac}"
 
 # Set ffmpeg codec and extension based on output format
 case "$output_format" in
@@ -62,7 +62,7 @@ get_file_hash() {
 }
 
 # Gather .mp4 and .webm files from downloads
-mapfile -t audio_files < <(find "${downloads}" -type f \( -iname "*.mp4" -o -iname "*.webm" \))
+mapfile -t audio_files < <(find "${downloads}" -type f \( -iname "*.m4a" -o -iname "*.mp4" -o -iname "*.webm" \))
 
 total=${#audio_files[@]}
 i=0
