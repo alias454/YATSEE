@@ -7,3 +7,6 @@ language_tool_python>=2.9.4
 sentence-transformers~=4.1.0
 requests~=2.32.4
 deepmultilingualpunctuation~=1.0.1
+webvtt-py~=0.5.1
+chromadb>=1.4.0
+streamlit>=1.52.2
