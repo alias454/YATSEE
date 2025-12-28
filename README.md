@@ -2,13 +2,15 @@
 
 **YATSEE** -- Yet Another Tool for Speech Extraction & Enrichment
 
-This project provides a modular pipeline for downloading, transcribing, cleaning, and preparing audio/video recordings into readable, structured text. It’s designed with a local-first philosophy, giving you full control over your data at every stage.
+YATSEE is a local-first, end-to-end data pipeline designed to systematically refine raw meeting audio into a clean, searchable, and auditable intelligence layer. It automates the tedious work of downloading, transcribing, and normalizing unstructured conversations.
+
+This is a local-first, privacy-respecting toolkit for anyone who wants to turn public noise into actionable intelligence.
 
 ## Why This Exists
 
-Capturing meetings, podcasts, or public hearings is easy. Turning them into something useful and searchable? Not so much.
+Public records are often public in name only. Civic business is frequently buried in four-hour livestreams and jargon-filled transcripts that are technically accessible but functionally opaque. The barrier to entry for an interested citizen is hours of time and complex jargon.
 
-Raw transcripts are often messy: broken sentence structure, inconsistent formatting, and poor readability. YATSEE steps through a clean, repeatable pipeline that transforms **raw audio** into **usable, structured text** that is ready for humans or machines.
+YATSEE solves that by using a carefully tuned local LLM to transform that wall of text into a high-signal summary—extracting the specific votes, contracts, and policy debates that matter. It's a tool for creating the clarity and accountability that modern civic discourse requires, with or without the government's help.
 
 ---
 
@@ -46,13 +48,26 @@ Scripts are modular, with clear input/output expectations.
 
 ### 4. Clean and Normalize
 #### a. Strip Timestamps
-- **Script:** `yatsee_vtt_to_txt.sh`
+- **Script:** `yatsee_slice_vtt.py`
 - **Input:** `.vtt` from `transcripts_<model>/`
 - **Output:** `.txt` (timestamp-free) to same folder
 
-#### b. Sentence Segmentation and Text Normalization
-- **Script:** `yatsee_normalize_structure.py`
+#### b. JSONL Segmentation and Text Compression
+- **Script:** `yatsee_slice_vtt.py`
+- **Input:** `.vtt` from `transcripts_<model>/`
+- **Output:** `.jsonl` to same folder
+  - **Purpose:** JSONL segments (sliced transcript for embeddings/search).
+
+#### c. Sentence Segmentation
+- **Script:** `yatsee_polish_transcript.py`
 - **Input:** `.txt` from `transcripts_<model>/`
+- **Output:** `.punct.txt` to `normalized/`
+- **Tool:** `deep multilingual punctuation model`
+  - **Purpose:** Deep learning punctuation.
+
+#### d. Text Normalization
+- **Script:** `yatsee_normalize_structure.py`
+- **Input:** `.punct.txt` from `normalized/`
 - **Output:** `.txt` to `normalized/`
 - **Tool:** `spaCy`
   - **Purpose:** Segment text into readable sentences and normalize punctuation/spacing.
@@ -68,9 +83,11 @@ Scripts are modular, with clear input/output expectations.
 
 All scripts are modular and can be run independently or as part of an automated workflow.
 
-### Index & Search _(planned)_
-- **Goal:** Store transcripts/summaries in a fast, queryable format (likely vector store or DB)
-- **Tools:** TBD
+### Index & Search _(In Development)_
+- **Goal:** Turn the generated summaries and raw transcripts into a searchable civic intelligence database.
+- **Vector Search (Semantic):** Use ChromaDB with the `nomic-embed-text` model to allow for fuzzy, concept-based queries (e.g., "Find discussions about road repairs").
+- **Graph Search (Relational):** Extract structured data (Votes, Contracts, Appointments) into a knowledge graph to trace connections between people and money.
+- **UI:** A simple web interface built with Streamlit to provide an overview of the city's operations.
 
 ---
 
@@ -103,11 +120,22 @@ This pipeline was developed and tested on the following setup:
   - **Shell:** Bash
   - **Python:** 3.8 or newer
 
-GPU acceleration was enabled for Whisper / faster-whisper using CUDA 12.8 and NVIDIA driver 570.144.
+Additional testing was performed on Apple Silicon (macOS):
+  - **Model:** Mac Mini (M4 Base)
+  - **CPU:** Apple M4 (10 cores / 4 performance cores, up to 120GB/s memory bandwidth)
+  - **RAM:** 16 GB
+  - **Storage:** NVMe SSD
+  - **OS:** macOS Sonoma / Sequoia
+  - **Shell:** ZSH
+  - **Python:** 3.9 or newer
 
-Note: The pipeline works on CPU-only systems without a GPU. However, transcription (especially with Whisper or faster-whisper) will be much slower compared to systems with CUDA-enabled GPU acceleration.
+GPU acceleration was enabled for Whisper / faster-whisper using CUDA 12.8 and NVIDIA driver 570.144 on Linux. However, faster whisper has limited/no support for mps.
 
-> ⚠️ Not tested on `macOS` or `Windows`. Use at your own risk on those platforms.
+Note: Audio transcription was much slower on the MAC than on Linux. it's doable but it's much slower.
+
+Note: The pipeline works on CPU-only systems without a GPU. However, transcription (especially with Whisper or faster-whisper) will be much slower compared to systems with CUDA-enabled GPU acceleration or MPS.
+
+> ⚠️ Not test on Windows. Use at your own risk on `Windows` platforms.
 
 ---
 
@@ -118,6 +146,7 @@ Note: The pipeline works on CPU-only systems without a GPU. However, transcripti
 
 ### Required Python Packages
 
+- `toml`             Needed for reading the toml config
 - `requests`         Needed for interacting with ollama API if installed
 - `torch`            Required for Whisper and model inference (with or without CUDA)
 - `pyyaml`           YAML output support (for summaries)
@@ -162,7 +191,7 @@ Install:
 pip install torch torchaudio tqdm
 pip install --upgrade git+https://github.com/openai/whisper.git
 
-pip install pyyaml spacy
+pip install toml pyyaml spacy
 python -m spacy download en_core_web_sm
 ```
 
@@ -201,29 +230,36 @@ Run each script in sequence or independently as needed:
 
 ### 2. Convert to Audio Format
 ```bash
-./yatsee_format_audio.sh downloads/
+./yatsee_format_audio.sh
 ```
 
 ### 3. Transcribe Audio
 ```bash
-python yatsee_transcribe_audio.py --input_dir audio/ --model base
+python yatsee_transcribe_audio.py --audio_input ./audio --model medium --faster
 ```
 
 ### 4. Clean Text
 
-**Strip timestamps**
+**Slice and segment vtt files for embeddings/search or Strip timestamps for txt**
 ```bash
-./yatsee_vtt_to_txt.sh transcripts_base/
+python yatsee_slice_vtt.py --vtt-input transcripts_<model> --output-dir transcripts_<model> --window 30
 ```
 
 **Normalize structure**
 ```bash
-python yatsee_normalize_structure.py --input_dir transcripts_base/
+# Install
+  python -m spacy download en_core_web_sm
+  
+python yatsee_normalize_structure.py -i transcripts_medium/
 ```
 
 ### 5. Optional: Summarize Transcripts
+
+YATSEE includes an optional script for generating summaries using a local LLM via the ollama tool. This script demonstrates one possible downstream use of the normalized transcripts.
+
 ```bash
-python yatsee_summarize_transcripts.py --input_dir normalized/
+# Requires ollama and a pulled model
+python3 yatsee_summarize_transcripts.py -i normalized/ -m your_pulled_model
 ```
 
 ### 📄 Script Summary
@@ -233,6 +269,6 @@ python yatsee_summarize_transcripts.py --input_dir normalized/
 | `yatsee_download_audio.sh`        | Download audio from YouTube URLs              |
 | `yatsee_format_audio.sh`          | Convert downloaded files to `.flac` or `.wav` |
 | `yatsee_transcribe_audio.py`      | Transcribe audio files to `.vtt`              |
-| `yatsee_vtt_to_txt.sh`            | Strip timestamps from `.vtt` files            |
+| `yatsee_slice_vtt.py `            | Slice and segment `.vtt` files                |
 | `yatsee_normalize_structure.py`   | Clean and normalize text structure            |
 | `yatsee_summarize_transcripts.py` | Generate summaries from cleaned transcripts   |
