@@ -42,8 +42,13 @@ import toml
 import textwrap
 import torch
 import torchaudio
+import warnings
 import importlib.util
 from tqdm import tqdm
+
+# Suppress specific warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
+warnings.filterwarnings("ignore", category=UserWarning, message="torchaudio._backend.utils.info has been deprecated")
 
 # Check if faster-whisper is installed
 HAS_FASTER_WHISPER = importlib.util.find_spec("faster_whisper") is not None
@@ -181,13 +186,13 @@ def main() -> int:
         "-l", "--lang",
         type=str,
         default="en",
-        help="Language spoken in audio (e.g. en, es, fr). Default is English."
+        help="Language spoken in audio (e.g. en, es, fr). Use 'auto' to enable language detection."
     )
     parser.add_argument(
         "-d", "--device",
-        choices=["cuda", "cpu"],
-        default="cuda",
-        help="Device for model execution: 'cuda' for GPU (default if available), 'cpu' for compatibility."
+        choices=["auto", "cuda", "cpu", "mps"],
+        default="auto",
+        help="Device for model execution: 'cuda' for NVIDIA GPU, 'mps' for Apple Silicon Support, 'cpu' for compatibility. Default is 'auto'"
     )
     parser.add_argument(
         "--faster",
@@ -209,6 +214,8 @@ def main() -> int:
         action="store_true",
         help="Suppress detailed output (overrides --verbose)."
     )
+    parser.add_argument("--threads", type=int, default=None, help="Max threads to use")
+
     args = parser.parse_args()
 
     # Get the base and entity keys
@@ -219,19 +226,31 @@ def main() -> int:
 
     full_key = base + entity
 
-    hotwords = load_flat_hotwords_str(config_file, full_key) or None
+    hotwords = load_flat_hotwords_str(config, full_key) or None
 
     # Verbose output flag
     verbose = args.verbose and not args.quiet
 
     # Validate and prepare device for model inference
-    if args.device == "cuda" and torch.cuda.is_available():
+    if torch.cuda.is_available() and args.device in ["auto", "cuda"]:
         torch.cuda.empty_cache()
         device = "cuda"
         use_fp16 = True  # Use fp16 for performance on GPU
+    elif torch.backends.mps.is_available() and args.device in ["auto", "mps"]:
+        if args.faster:
+            # Handle the Faster-Whisper Edge Case
+            print("⚠️ Faster-Whisper does not support MPS (Metal) yet. Using CPU (optimized for ARM with faster-whisper).")
+            device = "cpu"
+            use_fp16 = False
+        else:
+            # Apple Silicon Support
+            device = "mps"
+            use_fp16 = False
     else:
         if args.device == "cuda":
             print("⚠️ CUDA requested but not available, falling back to CPU.", file=sys.stderr)
+        if args.device == "mps":
+            print("⚠️ MPS requested but not available, falling back to CPU.", file=sys.stderr)
         device = "cpu"
         use_fp16 = False
 
@@ -269,6 +288,9 @@ def main() -> int:
 
     print(f"🔍 Found {len(audio_file_list)} audio file(s) to transcribe.\n")
 
+    # Set Language based on arg
+    lang = None if args.lang.lower() == "auto" else args.lang
+
     # Transcribe files using selected model
     for audio_path in audio_file_list:
         # Keep track of transcription time per file
@@ -282,7 +304,7 @@ def main() -> int:
             # Transcribe with faster-whisper
             print(f"🚀 Transcribing '{audio_path}' with faster-whisper...")
             try:
-                segments, _ = whisper_model.transcribe(audio_path, hotwords=hotwords, beam_size=5, language=args.lang)
+                segments, _ = whisper_model.transcribe(audio_path, hotwords=hotwords, beam_size=5, language=lang)
 
                 # Not really necessary but this gives a similar output to standard whisper
                 progress_bar = None
@@ -324,7 +346,7 @@ def main() -> int:
             # Transcribe with OpenAI whisper
             print(f"🐢 Transcribing '{audio_path}' with standard whisper...")
             try:
-                result = whisper_model.transcribe(audio_path, initial_prompt=hotwords, verbose=verbose, language=args.lang, fp16=use_fp16)
+                result = whisper_model.transcribe(audio_path, initial_prompt=hotwords, verbose=verbose, language=lang, fp16=use_fp16)
                 writer = get_writer("vtt", output_directory)
                 writer(result, audio_path, {"output_filename": base_name})
 
