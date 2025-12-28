@@ -100,41 +100,73 @@ def load_spacy_model() -> spacy.language.Language:
 
     :return: spaCy language model instance.
     """
-    return spacy.load("en_core_web_sm")
+    # return spacy.load("en_core_web_sm")
+    return spacy.load("en_core_web_md")
 
 
-def limit_repetitions(text: str, max_repeats: int = 5) -> str:
+# Collapse repeated phrases inside a line
+def collapse_inline(line: str, inline_max: int = 5) -> str:
     """
-    Limits repeated words/phrases within a line and across lines.
+    Limits repeated phrases inside a line and repeated full lines separately.
 
-    - Collapses inline phrase repetition (e.g., 'thank you thank you ...')
-    - Limits full-line repetitions (e.g., 'thank you.' repeated on new lines)
+    :param inline_max: Max inline phrase repetitions (default 5)
+    :return: Text with repetitions collapsed
+    """
+    pattern = re.compile(
+        r'\b((?:\w+\s+){0,4}\w+)(?:\s+\1){' + str(inline_max) + r',}',
+        flags=re.IGNORECASE
+    )
+    def replacer(match):
+        phrase = match.group(1)
+        return (' ' + phrase) * inline_max
+    return pattern.sub(replacer, line)
+
+
+def limit_repetitions(text: str, inline_max: int = 5, line_max: int = 1) -> str:
+    """
+    Limits CONSECUTIVE repeated phrases and full lines.
+    If a line appears at the start and end of a doc, both are kept.
+    If a line appears 5 times in a row, only the first `line_max` are kept.
 
     :param text: Multi-line transcript text
-    :param max_repeats: Maximum allowed repetitions (default: 5)
-    :return: Cleaned text with reduced repetition
+    :param inline_max: Max inline phrase repetitions (e.g., "thank you thank you")
+    :param line_max: Max CONSECUTIVE full-line repetitions
+    :return: Text with repetitions collapsed
     """
-    # Step 1: Collapse inline repeated phrases
-    def collapse_inline_repeats(line):
-        # Detect 2+ consecutive repeated phrases (1–5 words), collapse to max_repeats
-        pattern = re.compile(r'\b((?:\w+\s+){0,4}\w+)(?:\s+\1){' + str(max_repeats) + r',}', flags=re.IGNORECASE)
-        def replacer(match):
-            phrase = match.group(1)
-            return (' ' + phrase) * max_repeats
-        return pattern.sub(replacer, line)
-
-    # Step 2: Limit repeated full lines
-    line_counts = defaultdict(int)
     result_lines = []
 
+    # Store the normalized version of the previous line for robust comparison
+    prev_line_key = None
+    consecutive_count = 0
+
     for line in text.splitlines():
-        collapsed_line = collapse_inline_repeats(line.strip())
-        if not collapsed_line:
+        # First, collapse inline repetitions within the current line
+        processed_line = collapse_inline(line.strip(), inline_max)
+
+        # Create a normalized key for comparison (lowercase, no punctuation/spaces)
+        # This ensures "Thank you." and "  thank you" are treated as identical.
+        current_line_key = re.sub(r'[^a-z0-9]', '', processed_line.lower())
+
+        if not current_line_key:
+            # It's a blank line, reset our tracking and preserve it
             result_lines.append('')
+            prev_line_key = None
+            consecutive_count = 0
             continue
-        line_counts[collapsed_line] += 1
-        if line_counts[collapsed_line] <= max_repeats:
-            result_lines.append(collapsed_line)
+
+        # Check if this line is a consecutive repeat of the previous one
+        if current_line_key == prev_line_key:
+            consecutive_count += 1
+        else:
+            # The line is different, reset the counter
+            consecutive_count = 1
+
+        # Only add the line if its consecutive count is within the limit
+        if consecutive_count <= line_max:
+            result_lines.append(processed_line)
+
+        # Update the previous line key for the next iteration
+        prev_line_key = current_line_key
 
     return '\n'.join(result_lines)
 
@@ -168,70 +200,70 @@ def capitalize_sentences(text: str) -> str:
 def normalize_text(text: str, deep: bool = False) -> str:
     """
     Cleanup of transcript text using regular expressions.
-    Light cleaning (always applied):
-    Cleanup of transcript text using regular expressions.
+
     Light cleaning (always applied):
     - Removes carriage returns
-    - Trims leading and trailing spaces
-    - Collapses multiple whitespace characters
-    - Normalizes punctuation spacing
+    - Collapses whitespace
+    - Normalizes punctuation and spacing
+    - Collapses obvious stutters and repetitions
     - Capitalizes standalone 'i'
-    - Fixes number formatting (e.g., "$ 5,000" → "$5,000")
-    - Normalizes ellipses and excessive punctuation
-    - Fixes acronyms like "u.s bank" → "U.S. Bank"
+    - Fixes number and currency spacing
+    - Normalizes acronyms and ellipses
 
-    Deep cleaning (if enabled):
+    Deep cleaning (optional):
     - Removes filler words
-    - Strips content in [[double brackets]]
-    - Re-collapses whitespace
+    - Removes [[bracketed content]]
     - Trims excessive repeated characters
     """
-    # --- Light Cleaning ---
-    # 1. Remove carriage returns
-    text = text.replace('\r', '')
 
-    # 2. Trim leading/trailing spaces per line
-    text = re.sub(r'^ +| +$', '', text, flags=re.MULTILINE)
+    # --- 1. Normalize whitespace early ---
+    text = re.sub(r'[\s\r\n\u00A0]+', ' ', text)
 
-    # 3. Normalize ellipses (fix multiple dots with spaces)
-    text = re.sub(r'(\.\s*){2,}\.', '...', text)
+    # --- 2. Collapse character stutters (sooooo -> soo) ---
+    text = re.sub(r'(.)\1{3,}', r'\1\1', text)
 
-    # 4. Fix multiple dots on acronyms (U.S... → U.S.)
-    text = re.sub(r'(\b[A-Z]{1,3})\.+(?=\s|$)', r'\1.', text)
+    # --- 3. Collapse word-level stutters (F F F F -> F) ---
+    # Only collapses short tokens to avoid nuking legitimate repetition
+    text = re.sub(
+        r'\b([A-Za-z])(?:[\s,]+\1){2,}\b',
+        r'\1',
+        text
+    )
 
-    # 5. Add space after punctuation except dot (avoid messing decimals)
-    text = re.sub(r'([,!?;:])(\S)', r'\1 \2', text)
+    # --- 4. Collapse short phrase repetition (thank you thank you thank you) ---
+    text = re.sub(
+        r'\b((?:\w+\s+){0,3}\w+)(?:\s+\1){2,}',
+        r'\1',
+        text,
+        flags=re.IGNORECASE
+    )
 
-    # 6. Collapse multiple whitespace characters to single space
-    text = re.sub(r'[\s\u00A0]+', ' ', text)
+    # --- 5. Punctuation normalization ---
+    text = re.sub(r',{2,}', ',', text)
+    text = re.sub(r'([?!])\1+', r'\1', text)
 
-    # 7. Remove space before punctuation
-    text = re.sub(r' ([.,!?;:])', r'\1', text)
+    # Normalize ellipses safely
+    text = re.sub(r'\s*\.\s*\.\s*\.', ' ... ', text)
+    text = re.sub(r'\.{2,}', '.', text)
 
-    # 8. Capitalize standalone 'i'
+    # --- 6. Spacing around punctuation ---
+    text = re.sub(r'\s+([.,!?;:])', r'\1', text)
+    text = re.sub(r'([.,!?;:])(?=\S)', r'\1 ', text)
+
+    # --- 7. Content-specific fixes ---
     text = re.sub(r'\bi\b', 'I', text)
+    text = re.sub(r'\$\s+(\d)', r'$\1', text)
+    text = re.sub(r'(\d)\s+%', r'\1%', text)
 
-    # 9. Number formatting quirks fixes
-    text = re.sub(r'(?<=\d),\s(?=\d{3}\b)', r',', text)  # 1, 000 → 1,000
-    text = re.sub(r'(\d)\s+\.(\d)', r'\1.\2', text)  # 10. 05 → 10.05
-    text = re.sub(r'\$\s(?=\d)', r'$', text)  # $ 5,000 → $5,000
-    text = re.sub(r'(?<=\d)\s%(?!\S)', r'%', text)  # 10 % → 10%
+    # Normalize common acronym spacing
+    text = re.sub(r'\b(u)\.\s*(s)\.\b', 'U.S.', text, flags=re.IGNORECASE)
 
-    # 10. Fix excessive punctuation (like multiple exclamation marks)
-    text = re.sub(r'([!?])\1{2,}', r'\1\1', text)  # "!!!" → "!!"
-
+    # --- 8. Deep cleaning (optional) ---
     if deep:
-        text = re.sub(r'\b(um+|uh+|erm+|you know|like|so|well|ah|oh|mm|hmm|okay)\b', '', text, flags=re.IGNORECASE)
+        filler_words = r'\b(um|uh|erm|you know|like|so|well|ah|oh|mm|hmm|okay)\b'
+        text = re.sub(filler_words, '', text, flags=re.IGNORECASE)
+
         text = re.sub(r'\[\[.*?\]\]', '', text)
-        text = re.sub(r'\s{2,}', ' ', text)
-
-        # Normalize multiple dots to ellipsis, in case not caught above
-        text = re.sub(r'\.\.+', '...', text)
-
-        # Trim repeated characters (e.g. "heyyy" → "heyy")
-        text = re.sub(r'(.)\1{2,}', r'\1\1', text)
-
-        # Collapse multiple spaces again after removals
         text = re.sub(r'\s{2,}', ' ', text)
 
     return text.strip()
@@ -325,8 +357,11 @@ def main() -> int:
         return 1
 
     try:
-        file_list = get_files_list(args.txt_input)
-        file_list = filter_file(file_list)
+        # This needs to look for .punct.txt from the previous step
+        all_files = get_files_list(args.txt_input)
+        file_list = [f for f in all_files if f.lower().endswith('.punct.txt')]
+        if not file_list:
+            raise FileNotFoundError(f"No .punct.txt files found in directory: {args.txt_input}")
     except (FileNotFoundError, ValueError) as e:
         print(f"❌ {e}", file=sys.stderr)
         return 1
@@ -348,8 +383,15 @@ def main() -> int:
             return 1
 
     for file_path in file_list:
-        base_name = os.path.splitext(os.path.basename(file_path))[0]
-        output_file = os.path.join(output_dir, f"{base_name}.txt")
+        # Get the original filename, e.g., "meeting.punct.txt"
+        filename = os.path.basename(file_path)
+
+        # Create the desired output filename by replacing the intermediate extension
+        # "meeting.punct.txt" -> "meeting.txt"
+        output_filename = filename.replace('.punct.txt', '.txt')
+
+        # Construct the full path for the final output file
+        output_file = os.path.join(output_dir, output_filename)
 
         if os.path.isfile(output_file) and not args.force:
             print(f"↪ Skipping existing: {output_file}")
@@ -359,13 +401,13 @@ def main() -> int:
         with open(file_path, "r", encoding="utf-8") as infile:
             raw_text = infile.read()
 
-            # Perform cleaning and capitalization if required
-            normalized_text = normalize_text(raw_text, deep=args.deep_clean)
-            normalized_text = limit_repetitions(normalized_text, max_repeats=5)
-            normalized_text = capitalize_sentences(normalized_text)
+        # Perform cleaning and capitalization if required
+        normalized_text = normalize_text(raw_text, deep=args.deep_clean)
+        normalized_text = capitalize_sentences(normalized_text)
+        normalized_text = process_text_to_sentences(normalized_text, spacy_model, use_spacy, args.preserve_paragraphs)
+        processed_text = limit_repetitions(normalized_text, inline_max=2, line_max=1)
 
-        processed_text = process_text_to_sentences(normalized_text, spacy_model, use_spacy, args.preserve_paragraphs)
-        # write file out to filesystem
+        # Write the final clean file to the filesystem
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(processed_text)
             print(f"✓ Wrote: {output_file}")
