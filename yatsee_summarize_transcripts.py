@@ -224,6 +224,7 @@ PROMPTS = {
         "- Cover key discussion points and speakers.\n"
         "- Document motions made, seconded, and outcomes.\n"
         "- Include votes with counts or roll call results when available.\n"
+        "- If a motion 'passes' here, it means it is 'Recommended to City Council' or 'Moved Forward', NOT 'Approved'.\n"
         "- Highlight notable quotes influencing decisions.\n"
         "- Note recommendations to higher bodies (e.g., city council).\n"
         "- List follow-ups or pending reviews.\n"
@@ -248,7 +249,8 @@ PROMPTS = {
         "- Remove redundancy across chunks; combine repeated information.\n"
         "- Use markdown formatting: clear headers, bullet points, and clean lists.\n"
         "- Avoid robotic phrasing or repeating 'Alderman X said...' unless it adds value.\n"
-        "- If a motion is described in multiple ways, preserve the **clearest or most complete version**."
+        "- If a motion is described in multiple ways, preserve the **clearest or most complete version**.\n"
+        "- If a motion 'passes' here, it means it is 'Recommended to City Council' or 'Moved Forward', NOT 'Approved'."
     ),
     "detailed": (
         "You are an assistant that produces structured meeting minutes from transcripts.\n\n"
@@ -282,12 +284,23 @@ PROMPTS = {
         "Context: {context}\n\n"
         "Transcript:\n{text}\n\n"
         "Instructions:\n"
-        "- Summarize all important agenda items, discussions, and decisions.\n"
+        "- Summarize all agenda items, discussions, and decisions.\n"
+        "- If a vote outcome is mentioned anywhere in the transcript, it must be included.\n"
+        "- Do not omit a vote because it seems routine or uncontested.\n"
         "- Include motions, who made and seconded them, and vote outcomes. If a roll call vote is taken, list how each person voted.\n"
+        "- Group content under clear, topical headers (e.g., Ordinance Changes, Public Funding, Planning and Zoning).\n"
+        "- Use only the following section headers when applicable:\n"
+        "    1. Ordinances and Resolutions\n"
+        "    2. Contracts and Spending\n"
+        "    3. Property and Development\n"
+        "    4. Appointments\n"
+        "    5. Public Comment\n"
+        "    6. Other Discussion\n"
         "- Identify speakers by name or title *only if clearly stated*. Do not guess or combine similar names (e.g., 'Wayne' and 'Director Duckman') unless explicitly linked.\n"
         "- If a speaker is unnamed, refer to them generically (e.g., 'a council member said...').\n"
         "- Use quotes sparingly and only when they add clarity or emphasis. Otherwise, paraphrase naturally.\n"
         "- Group content under clear, natural section headers. Avoid copying transcript labels like 'Item Number Four.'\n"
+        "- Never refer to an item by number alone (e.g., 'Item 4'). Always provide the topic (e.g., 'Item 4: [Agenda Topic Name]').\n"
         "- Maintain a neutral, civic tone. Avoid robotic phrasing or repetition.\n"
         "- Use plain numbers (e.g., '2' instead of 'II').\n"
         "- Avoid assuming gender. Use gendered pronouns only when unambiguous from the transcript."
@@ -297,7 +310,8 @@ PROMPTS = {
         "Context: {context}\n\n"
         "Transcript:\n{text}\n\n"
         "Instructions:\n"
-        "- Summarize all substantive agenda items, discussion points, and decisions without over-compressing.\n"
+        "- Summarize all agenda items, discussion points, and decisions without over-compressing.\n"
+        "- If a vote outcome is mentioned anywhere in the transcript, it must be included.\n"
         "- Retain detail on motions, who made and seconded them, and vote outcomes. If a roll call vote is included, list individual votes.\n"
         "- Preserve attribution when names or titles are explicitly stated. Refer to unnamed speakers generically (e.g., 'a resident said...').\n"
         "- Group content under natural, informative section headers (e.g., 'Public Comments,' 'Budget Discussion'). Avoid generic item labels.\n"
@@ -315,14 +329,38 @@ PROMPTS = {
         "**Instructions:**\n"
         "- Output must be formatted in **Markdown**.\n"
         "- Use **plain Arabic numerals (1, 2, 3...)** for section headers. **Do not use Roman numerals.**\n"
+        "- **CRITICAL:** Never refer to an item by number alone (e.g., 'Item 4'). Always provide the topic (e.g., 'Item 4: [Agenda Topic Name]').\n"
         "- Group content under clear, topical headers (e.g., Ordinance Changes, Public Funding, Planning and Zoning).\n"
+        "- Use only the following section headers when applicable:\n"
+        "    1. Ordinances and Resolutions\n"
+        "    2. Contracts and Spending\n"
+        "    3. Property and Development\n"
+        "    4. Appointments\n"
+        "    5. Public Comment\n"
+        "    6. Other Discussion\n"
+        "- If a vote outcome is mentioned anywhere in the transcript, it must be included.\n"
+        "- Capture **all motions and votes**, including failed votes, first readings, deferrals, and procedural attempts.\n"
+        "- Keep each attempt distinct, even if a later vote passes the item. Show the sequence of first reading, second reading, and final vote.\n"
+        "- Include motions, who made and seconded them, and vote outcomes for every vote mentioned.\n"
+        "- Surface procedural discussion and debate, especially if it indicates disagreement, division, or confusion.\n"
+        "- Do not collapse repeated votes into a single final outcome. Preserve the full procedural history.\n"
+        "- Flag items that are routine but still voted on, so nothing is silently omitted.\n"
         "- Focus on real civic impact: surface ordinance changes, grant activity, public funding, zoning decisions, infrastructure/budget items, emotionally charged issues, controversies, and unresolved matters.\n"
         "- Include **brief quotes** when they express public sentiment, concern, or disagreement.\n"
         "- Flag votes, funding amounts, appointments, and any item likely to impact residents or warrant follow-up.\n"
         "- Exclude filler or procedural commentary unless it affects transparency, accountability, or trust.\n"
+        "- Treat the following as high-priority if present, in this order:\n"
+        "    1. Ordinances and resolutions\n"
+        "    2. Votes involving money, property, or contracts\n"
+        "    3. Appointments or removals\n"
+        "    4. Public comments expressing concern or disagreement\n"
+        "    5. Deferred or unresolved items\n"
         "- Use **they/them pronouns** unless gender is clearly stated.\n"
-        "- Keep the summary skimmable in **2–3 minutes** for an engaged citizen audience.\n"
-        "- Be consistent and avoid repeating section headers.\n"
+        "- Keep the summary skimmable but comprehensive for an engaged citizen audience.\n"
+        "- Be consistent and avoid repeating section headers by merging topics where applicable.\n"
+        "- **Do NOT include any internal notes, meta-commentary, explanations of how this summary was created, or references to the summarization process.**\n"
+        "- Never include meta-commentary, task acknowledgements, explanations, or conversational filler (e.g., ‘let me know if…’, ‘here is the summary’, ‘this concludes'). Output only the summary.\n"
+        "- Output must consist only of section headers and factual bullet points derived from the transcript."
     ),
     "final_pass_detailed": (
         "You are an assistant that synthesizes structured summaries of public meetings into a unified, readable markdown file.\n\n"
@@ -340,21 +378,28 @@ PROMPTS = {
         "- Use markdown headings to match the meeting flow, and include bullet points for clarity where appropriate.\n"
         "- Keep a professional, neutral tone throughout — do not invent dialogue or fill in missing attribution.\n"
         "- Use plain numbers (e.g., '2'), avoid duplicate metadata (e.g., meeting date), and do not repeat sections.\n"
-        "- **Do NOT include any internal notes, meta-commentary, explanations of how this summary was created, or references to the summarization process.**"
+        "- Omit any section header entirely if no relevant content exists.\n"
+        "- **Do NOT include any internal notes, meta-commentary, explanations of how this summary was created, or references to the summarization process.**\n"
+        "- Never include meta-commentary, task acknowledgements, explanations, or conversational filler (e.g., ‘let me know if…’, ‘here is the summary’, ‘this concludes'). Output only the summary.\n"
+        "- Output must consist only of section headers and factual bullet points derived from the transcript."
     )
 }
 
 CLASSIFIER_PROMPT = {
     "classifier": (
-    "You are an assistant that analyzes meeting transcripts to determine the meeting type.\n\n"
+    "You are a routing assistant. Classify this meeting to select the correct summary template.\n\n"
     "Context: {context}\n\n"
-    "Transcript:\n{text}\n\n"
-    "Based on the content and structure of the meeting, classify it into **one** of the following categories:\n"
+    "Transcript Snippet:\n{text}\n\n"
+    "Based on context and structure of the snippet, classify as **one** of the following categories:\n"
     "- city_council\n"
     "- finance_committee\n"
     "- committee_of_the_whole\n"
     "- zoning_committee\n"
     "- general\n\n"
+    "Analysis Rules:\n"
+    "1. **Finance Priority:** If Context mentions 'Finance', 'Budget', or 'Appropriation', classify as 'finance_committee' (even if it says 'Committee of the Whole').\n"
+    "2. **COW vs Council:** If Context says 'Committee of the Whole', classify as 'committee_of_the_whole'. Only classify as 'city_council' if the Context indicates a Regular/Special Council meeting.\n"
+    "3. **Zoning:** If Context mentions 'Zoning' or 'Planning', classify as 'zoning_committee'.\n\n"
     "Return only the classification value as plain text. Do not include explanations or additional commentary."
     )
 }
@@ -497,17 +542,29 @@ def get_files_list(path: str) -> list[str]:
     :raises ValueError: If unsupported file extension encountered
     """
     valid_extensions = (".txt", ".out")
+    ignored_suffixes = (".punct.txt",)
     txt_files = []
 
     if os.path.isdir(path):
         for filename in os.listdir(path):
             full_path = os.path.join(path, filename)
+
+            # Skip ignored suffix
+            if full_path.lower().endswith(ignored_suffixes):
+                continue
+
             if os.path.isfile(full_path) and filename.lower().endswith(valid_extensions):
                 txt_files.append(full_path)
         if not txt_files:
             raise FileNotFoundError(f"No valid .txt files found in directory: {path}")
     elif os.path.isfile(path):
-        if path.lower().endswith(valid_extensions):
+        filename = os.path.basename(path)
+
+        # Explicit check for single file input
+        if filename.lower().endswith(ignored_suffixes):
+            raise ValueError(f"Input file '{filename}' is an intermediate artifact. Use the final .txt file.")
+
+        if filename.lower().endswith(valid_extensions):
             txt_files.append(path)
         else:
             raise ValueError(f"Unsupported file extension: {os.path.splitext(path)[1]}")
@@ -601,7 +658,15 @@ def summarize_transcript(session: requests.Session, model: str, prompt: str = "d
     :return: The generated summary as a string
     :raises RuntimeError: On HTTP or JSON streaming errors
     """
-    payload = {"model": model, "prompt": prompt}
+    # payload = {"model": model, "prompt": prompt}
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "temperature": 0.2,
+        "options": {
+            "num_ctx": 32768
+        }
+    }
 
     try:
         response = session.post(f"{OLLAMA_SERVER_URL}/api/generate", json=payload, stream=True)
@@ -654,32 +719,6 @@ def write_summary_file(summary: str, basename: str, output_dir: str, fmt: str = 
         print(f"❌ Unexpected error during write: {e}")
 
     return False
-
-
-def write_chunk_files(chunks: list[str], output_dir: str, meeting_type: str, base_name: str) -> bool:
-    """
-    Save transcript chunks to disk under organized directory structure.
-
-    :param chunks: List of text chunks to write
-    :param output_dir: Base directory for output files
-    :param meeting_type: Meeting category label (e.g., 'city_council')
-    :param base_name: Base filename (without extension) for chunk files
-    :return: True if all chunks saved successfully, False otherwise
-    """
-    try:
-        chunks_path = os.path.join(output_dir, "chunks", meeting_type, base_name)
-        os.makedirs(chunks_path, exist_ok=True)
-
-        for idx, chunk_text in enumerate(chunks):
-            chunk_filename = f"{base_name}_part{idx:02d}.txt"
-            chunk_path = os.path.join(chunks_path, chunk_filename)
-            with open(chunk_path, "w", encoding="utf-8") as f:
-                f.write(chunk_text)
-        return True
-    except Exception as e:
-        print(f"Error saving chunks: {e}")
-        return False
-
 
 def generate_known_speakers_context(speaker_matches: dict) -> List[str] | str:
     """
@@ -838,13 +877,13 @@ def main():
         """)
     )
 
-    parser.add_argument("-m", "--model", help="Model name (e.g. 'llama3', 'mistral', gemma:2b)")
+    parser.add_argument("-m", "--model", help="Model name (e.g. 'llama3:latest', 'mistral:latest', 'mistral-nemo:latest', gemma:2b)")
     parser.add_argument("-i", "--txt-input", help="Path to a transcript file or directory (supports .txt or .out)")
     parser.add_argument("-c", "--context", default="", help="Optional meeting context to guide summarization")
-    parser.add_argument("-o", "--output-dir", default="summary", help="Directory to save the summary output(Default: summary)")
-    parser.add_argument("-f", "--output-format", choices=["markdown", "yaml"], default="markdown", help="Summary output format")
-    parser.add_argument("-w", "--max-words", type=int, default=3500, help="Word count above which transcript is chunked")
-    parser.add_argument("-t", "--max-tokens", type=int, default=2500, help="Approximate max tokens per chunk")
+    parser.add_argument("-o", "--output-dir", default="summary", help="Directory to save the summary output (Default: summary)")
+    parser.add_argument("-f", "--output-format", choices=["markdown", "yaml"], default="markdown", help="Summary output format (Default: markdown)")
+    parser.add_argument("-w", "--max-words", type=int, default=13500, help="Word count above which transcript is chunked (Default: 3500)")
+    parser.add_argument("-t", "--max-tokens", type=int, default=16500, help="Approximate max tokens per chunk (Default: 2500)")
     parser.add_argument("-p", "--max-pass", type=int, default=3, help="Max number of iterations for multi-pass refinement (Default: 3)")
     parser.add_argument("-d", "--disable-auto-classification", action="store_true", help="Disable auto classification. Make sure to set first and second pass prompts")
     parser.add_argument("--first-prompt", choices=PROMPTS.keys(), help="Prompt type to use for summarization (Only used when auto classification is disabled)")
@@ -875,9 +914,9 @@ def main():
         return 0
 
     # Check for passed in arg.model
-    supported_models = ["mistral", "llama3", "gemma:2b"]
+    supported_models = ["mistral:latest", "mistral-nemo:latest", "llama3:latest", "gemma:2b", "qwen2.5:7b-instruct-q4_k_m"]
     if not args.model:
-        print("❌ No model specified. Use --model to set one (e.g. mistral, llama3).", file=sys.stderr)
+        print("❌ No model specified. Use --model(-m) to set one (e.g. mistral:instruct, llama3:latest).", file=sys.stderr)
         return 1
 
     if args.model.lower() not in supported_models:
@@ -886,7 +925,7 @@ def main():
 
     # Collect txt files from input path
     if not args.txt_input:
-        print("❌ No input file or directory specified. Use --txt-input to set one.", file=sys.stderr)
+        print("❌ No input file or directory specified. Use --txt-input(-i) to set one.", file=sys.stderr)
         return 1
 
     try:
@@ -946,17 +985,6 @@ def main():
             while pass_num <= args.max_pass:
                 # Select prompt type: first pass uses 'prompt_type_first', subsequent use 'prompt_type_second'
                 prompt_type = first_pass_id if pass_num == 1 else multi_pass_id
-
-                enable_chunk_writer = False
-                if enable_chunk_writer:
-                    # Prepare transcript for RAG if chunk writer enabled
-                    # This will use half the max tokens per chunk with about 16.7% overlap
-                    chunks = prepare_text_chunk(transcript, int(args.max_tokens / 2), int(args.max_tokens / 6))
-                    write_chunk_files(chunks, output_dir, meeting_type, base_name)
-
-                chunks_only = False
-                if chunks_only:
-                    break  # exit the while loop
 
                 # Prepare transcript for summarization by chunking contents if necessary
                 # If text too large to summarize in one call, break into chunks and summarize each chunk
