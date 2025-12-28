@@ -65,7 +65,7 @@ downloads='./downloads'
 id_tracker="${downloads}/.downloaded"
 
 # Date range for videos to process
-DATEAFTER=${2:-20241231}
+DATEAFTER=${2:-$(date -d "-90 day" +%Y%m%d)}
 DATEBEFORE=${3:-$(date -d "+1 day" +%Y%m%d)}
 
 # Sleep and retry configs
@@ -83,7 +83,7 @@ mkdir -p "${downloads}"
 touch "${id_tracker}"
 
 echo "Fetching list of video IDs from the channel..."
-video_ids=$(yt-dlp --flat-playlist --get-id "${CHANNEL_URL}")
+video_ids=$(yt-dlp --js-runtimes node --flat-playlist --get-id "${CHANNEL_URL}")
 
 for audio_id in ${video_ids}; do
     # Skip if already downloaded.
@@ -93,7 +93,7 @@ for audio_id in ${video_ids}; do
   fi
 
   # Need to do this since alternatives suck even worse
-  upload_date=$(yt-dlp --print "%(upload_date)s" "https://www.youtube.com/watch?v=${audio_id}" 2>/dev/null)
+  upload_date=$(yt-dlp --js-runtimes node --print "%(upload_date)s" "https://www.youtube.com/watch?v=${audio_id}" 2>/dev/null)
 
   if [[ -z "${upload_date}" ]]; then
     echo "⚠️ Skipping ${audio_id} (no upload date)"
@@ -122,6 +122,7 @@ for audio_id in ${video_ids}; do
     # --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36" \
     # -o "${downloads}/%(id)s.%(title)s.%(ext)s" "https://www.youtube.com/watch?v=${audio_id}"
   yt-dlp \
+    --js-runtimes node \
     --retries "${MAX_RETRIES}" \
     --fragment-retries "${FRAGMENT_RETRIES}" \
     --concurrent-fragments "${CONCURRENT_RETRIES}" \
@@ -129,7 +130,7 @@ for audio_id in ${video_ids}; do
     --max-sleep-interval "${MAX_SLEEP}" \
     --throttled-rate "${THROTTLED_RATE}" \
     --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36" \
-    -f bestaudio \
+    -f "bestaudio/best" \
     -o "${downloads}/%(id)s.%(title)s.%(ext)s" "https://www.youtube.com/watch?v=${audio_id}"
 
   # Find the audio file for this video
