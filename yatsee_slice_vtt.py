@@ -1,149 +1,377 @@
 #!/usr/bin/env python3
 """
-Processes VTT subtitle files into:
-1) Plain text transcripts (.txt)
-2) Time-sliced transcript segments (.segments.jsonl)
+yatsee_slice_vtt.py
 
-This script is designed as an early structural step in the pipeline:
-- Preserves timestamps for later video linking
-- Produces fixed-duration transcript segments for embedding and search
-- Avoids linguistic normalization or sentence-level decisions
+Stage 4 of YATSEE: Slice .vtt transcripts into plain text and time-windowed JSONL segments.
 
-The output of this script should be treated as a *canonical structural layer*.
-Later stages may summarize, embed, or analyze this data, but should not
-rewrite timestamps or segmentation.
+Input/Output:
+  - Input: WebVTT files (.vtt) in 'transcripts_<model>/' or specified path under
+    entity_handle
+  - Output: Optional plain text (.txt) and segment JSONL (.segments.jsonl) files
+    in the same directory
 
-Requirements:
-- Python 3.8+
-- webvtt-py
+Dependencies:
+  - toml (for config parsing)
+  - webvtt-py
+  - hashlib, json, argparse, typing, os, sys
 
-Install with:
-  pip install webvtt-py
+Usage Examples:
+  ./yatsee_slice_vtt.py -e entity_handle --vtt-input ./transcripts --create-txt
+  ./yatsee_slice_vtt.py --vtt-input ./audio/transcripts --window 30 --force
 
-Usage:
-  ./yatsee_vtt_slice.py --vtt-input meeting.vtt --output-dir out/
-  ./yatsee_vtt_slice.py --vtt-input transcripts/ --output-dir processed/ --window 30 --force
+Features:
+- Sentence-aware cue consolidation preserving line breaks in TXT.
+- JSONL segments with start/end timestamps for vector search & YouTube linking.
+- Supports entity-specific configuration merged with global yatsee.toml.
+- Safe defaults, verbose/quiet CLI, and deterministic placeholder video IDs.
 """
 
 import os
 import sys
-import argparse
 import json
+import argparse
+import hashlib
+import random
+import string
 import re
-from typing import List, Optional
+from typing import List, Dict, Optional, Any
+
+import toml
 import webvtt
 
 
-def get_files_list(path: str) -> List[str]:
+def load_global_config(path: str) -> Dict[str, Any]:
     """
-    Resolve a list of .vtt files from a file or directory path.
+    Load the global YATSEE configuration file.
 
-    This mirrors behavior in other Yatsee scripts:
-    - Accepts a single .vtt file
-    - Accepts a directory containing multiple .vtt files
-    - Fails loudly if nothing usable is found
-
-    :param path: Path to a .vtt file or directory
-    :return: List of resolved .vtt file paths
+    :param path: Path to the global TOML config file
+    :return: Parsed global configuration as a dictionary
+    :raises FileNotFoundError: If the file does not exist
+    :raises ValueError: If the TOML cannot be parsed
     """
-    vtt_files = []
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Global configuration file not found: {path}")
+    try:
+        return toml.load(path)
+    except Exception as exc:
+        raise ValueError(f"Failed to parse global config '{path}': {exc}") from exc
 
-    if os.path.isdir(path):
-        for filename in os.listdir(path):
-            full_path = os.path.join(path, filename)
-            if os.path.isfile(full_path) and filename.lower().endswith(".vtt"):
-                vtt_files.append(full_path)
 
-        if not vtt_files:
-            raise FileNotFoundError(f"No .vtt files found in directory: {path}")
+def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any]:
+    """
+    Load and merge entity-specific configuration with global defaults.
 
-    elif os.path.isfile(path):
-        if path.lower().endswith(".vtt"):
-            vtt_files.append(path)
+    :param global_cfg: Global configuration dictionary
+    :param entity: Entity handle to load (e.g., 'us_ca_fresno_city_council')
+    :return: Merged entity configuration dictionary
+    :raises KeyError: If entity is not defined in global config
+    :raises FileNotFoundError: If local entity config is missing
+    """
+    reserved_keys = {"settings", "meta"}
+
+    entities_cfg = global_cfg.get("entities", {})
+    if entity not in entities_cfg:
+        raise KeyError(f"Entity '{entity}' not defined in global config")
+
+    system_cfg = global_cfg.get("system", {})
+    root_data_dir = os.path.abspath(system_cfg.get("root_data_dir", "./data"))
+    local_path = os.path.join(root_data_dir, entity, "config.toml")
+    if not os.path.exists(local_path):
+        raise FileNotFoundError(f"Local config for entity '{entity}' not found at: {local_path}")
+
+    local_cfg = toml.load(local_path)
+
+    merged = {
+        "entity": entity,
+        "root_data_dir": root_data_dir,
+        **system_cfg,
+        **entities_cfg.get(entity, {}),
+    }
+
+    for key, value in local_cfg.items():
+        if key in reserved_keys:
+            merged.update(value)
         else:
-            raise ValueError(f"Unsupported file extension: {path}")
+            merged[key] = value
+    return merged
 
+
+def discover_files(input_path: str, supported_exts) -> List[str]:
+    """
+    Collect files from a directory or single file based on allowed extensions.
+
+    :param input_path: Path to directory or file
+    :param supported_exts: Supported file extensions tuple
+    :return: Sorted list of valid audio file paths
+    :raises FileNotFoundError: If path does not exist
+    :raises ValueError: If file extension is unsupported
+    """
+    valid_exts = supported_exts
+    files: List[str] = []
+
+    if os.path.isdir(input_path):
+        for f in os.listdir(input_path):
+            full = os.path.join(input_path, f)
+            if os.path.isfile(full) and f.lower().endswith(valid_exts):
+                files.append(full)
+        if not files:
+            return [] # No files isn't an error
+    elif os.path.isfile(input_path):
+        if input_path.lower().endswith(valid_exts):
+            files.append(input_path)
+        else:
+            raise ValueError(f"Unsupported file extension: {os.path.splitext(input_path)[1]}")
     else:
-        raise FileNotFoundError(f"Input path not found: {path}")
+        raise FileNotFoundError(f"Path not found: {input_path}")
 
-    return vtt_files
+    return sorted(files)
 
 
-def clean_text(text: str) -> str:
+def read_vtt(vtt_path: str) -> List[Dict[str, Any]]:
     """
-    Perform minimal, non-destructive cleanup on caption text.
+    Read a VTT file into a list of cues with absolute timestamps.
 
-    Preserves original line breaks from the VTT cues.
-
-    :param text: Raw caption text from VTT
-    :return: Cleaned text with line breaks preserved
-    """
-    # Normalize spaces but preserve existing line breaks
-    lines = text.splitlines()
-    lines = [re.sub(r"\s+", " ", line).strip() for line in lines]
-    return "\n".join(lines)
-
-
-def read_vtt(vtt_path: str) -> list:
-    """
-    Load a VTT file and convert cues into a normalized internal structure.
-
-    Each cue is represented as a dict with:
-    - start time (seconds)
-    - end time (seconds)
-    - minimally cleaned text
+    Each cue contains:
+    - start: start time in seconds
+    - end: end time in seconds
+    - text: cleaned caption text
 
     :param vtt_path: Path to .vtt file
-    :return: List of cue dictionaries
+    :return: List of cue dictionaries: {"start", "end", "text"}
     """
     cues = []
-
-    for cap in webvtt.read(vtt_path):
-        cues.append({
-            "start": cap.start_in_seconds,
-            "end": cap.end_in_seconds,
-            "text": clean_text(cap.text),
-        })
-
+    try:
+        for cap in webvtt.read(vtt_path):
+            cues.append({
+                "start": round(cap.start_in_seconds, 3),
+                "end": round(cap.end_in_seconds, 3),
+                "text": cap.text.strip()
+            })
+    except (webvtt.errors.MalformedFileError, ValueError, OSError) as exc:
+        raise ValueError(f"Failed to read VTT '{vtt_path}': {exc}") from exc
     return cues
 
 
-def write_txt(cues: list, output_path: str) -> None:
+def consolidate_sentences1(cues: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Write a plain text transcript from VTT cues.
+    Merge VTT cues into sentence-bound segments for JSONL and TXT output.
 
-    This output is intended for:
-    - Human inspection
-    - Downstream normalization scripts
-    - Fallback processing when timestamps are not required
+    - Cues without terminal punctuation are merged with next cues.
+    - Preserves line breaks in TXT.
+    - JSONL segment start = first cue start, end = last cue end in sentence.
 
-    The ordering strictly follows cue order.
-    Original line breaks from the VTT are preserved.
-
-    :param cues: List of normalized cue dictionaries
-    :param output_path: Destination .txt file path
+    :param cues: List of cue dictionaries from read_vtt
+    :return: List of sentence-aware segments
     """
-    with open(output_path, "w", encoding="utf-8") as f:
-        for cue in cues:
-            if cue["text"]:
-                # preserve line breaks within each cue
-                f.write(cue["text"] + "\n")
+    segments = []
+    buffer = []
+    seg_start = None
+
+    # Sentence-ending punctuation regex
+    end_punct = re.compile(r"[.!?…]+$")
+
+    for cue in cues:
+        text = cue["text"].replace("\n", " ").strip()  # single-line buffer
+        if not text:
+            continue
+
+        if seg_start is None:
+            seg_start = cue["start"]
+        buffer.append(text)
+
+        # If sentence-ending punctuation exists, flush buffer
+        if end_punct.search(text):
+            seg_end = cue["end"]
+            segments.append({
+                "start": seg_start,
+                "end": seg_end,
+                "text_raw": " ".join(buffer)
+            })
+            buffer = []
+            seg_start = None
+
+    # Flush any remaining buffer
+    if buffer:
+        segments.append({
+            "start": seg_start,
+            "end": cues[-1]["end"],
+            "text_raw": " ".join(buffer)
+        })
+
+    return segments
 
 
-def slice_cues(cues: list, source_id: str, window_size: float, video_url: Optional[str] = None,) -> list:
+def consolidate_sentences(cues: List[Dict[str, Any]], max_window: Optional[float] = None) -> List[Dict[str, Any]]:
     """
-    Slice caption cues into fixed-duration time windows.
+    Merge VTT cues into sentence-bound segments for JSONL and TXT output.
 
-    This produces deterministic, time-bounded transcript segments
-    suitable for embeddings, search indexing, and video linking.
+    - Cues without terminal punctuation are merged with next cues.
+    - Preserves line breaks in TXT.
+    - Flushes buffer if max_window exceeded (seconds).
 
-    Segments are built sequentially based on cue start times.
-    No attempt is made to align to sentence or speaker boundaries.
+    :param cues: List of cue dictionaries from read_vtt
+    :param max_window: Optional max duration (seconds) per segment
+    :return: List of sentence-aware segments
+    """
+    segments = []
+    buffer = []
+    seg_start = None
 
-    :param cues: List of normalized cue dictionaries
-    :param source_id: Canonical meeting/source identifier
-    :param window_size: Window duration in seconds
-    :param video_url: Optional base video URL for timestamp links
+    end_punct = re.compile(r"[.!?…]+$")
+
+    for cue in cues:
+        text = cue["text"].replace("\n", " ").strip()
+        if not text:
+            continue
+
+        if seg_start is None:
+            seg_start = cue["start"]
+        buffer.append(text)
+
+        seg_end = cue["end"]
+        duration = seg_end - seg_start
+
+        # Flush if sentence ends or max_window exceeded
+        if end_punct.search(text) or (max_window and duration >= max_window):
+            segments.append({
+                "start": seg_start,
+                "end": seg_end,
+                "text_raw": " ".join(buffer)
+            })
+            buffer = []
+            seg_start = None
+
+    if buffer:
+        segments.append({
+            "start": seg_start,
+            "end": cues[-1]["end"],
+            "text_raw": " ".join(buffer)
+        })
+
+    return segments
+
+
+def generate_placeholder_id(base_name: Optional[str] = None) -> str:
+    """
+    Generate deterministic 11-character placeholder ID.
+
+    :param base_name: Optional seed for deterministic ID
+    :return: 11-character alphanumeric ID
+    """
+    if base_name:
+        digest = hashlib.sha256(base_name.encode("utf-8")).hexdigest()
+        return ''.join(c for c in digest if c.isalnum())[:11]
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=11))
+
+
+def load_video_id_map(id_map_path: str) -> Dict[str, str]:
+    """
+    Load mapping from lowercase filename to real YouTube IDs.
+
+    Design notes:
+    - Only lines of length 11 considered valid IDs.
+    - Used for mapping downloaded videos to VTT files.
+
+    :param id_map_path: Path to .downloaded file
+    :return: Dict mapping lowercase filename -> real YouTube ID
+    """
+    id_map = {}
+    if os.path.exists(id_map_path):
+        with open(id_map_path, "r", encoding="utf-8") as f:
+            for line in f:
+                real_id = line.strip()
+                if real_id and len(real_id) == 11:
+                    id_map[real_id.lower()] = real_id
+    return id_map
+
+
+def write_jsonl(segments: List[Dict[str, Any]], jsonl_path: str, source_id: str, video_id: str) -> None:
+    """
+    Write JSONL segments for vector search / timestamp mapping.
+
+    :param segments: Sentence-aware segments
+    :param jsonl_path: Path for output .jsonl file
+    :param source_id: Base source ID
+    :param video_id: YouTube ID or placeholder
+    """
+    with open(jsonl_path, "w", encoding="utf-8") as f:
+        for idx, seg in enumerate(segments):
+            out = {
+                "id": f"{source_id}_{idx:05d}",
+                "source": source_id,
+                "segment_index": idx,
+                "start_time": seg["start"],
+                "end_time": seg["end"],
+                "duration": round(seg["end"] - seg["start"], 3),
+                "text_raw": seg["text_raw"],
+                "video_id": video_id
+            }
+            f.write(json.dumps(out, ensure_ascii=False) + "\n")
+
+
+def write_txt(segments: List[Dict[str, Any]], txt_path: str) -> None:
+    """
+    Write plain text transcript from sentence-aware segments.
+
+    - Preserves line breaks between sentences.
+    - Only non-empty text is written.
+
+    :param segments: List of sentence segments
+    :param txt_path: Path for output .txt file
+    """
+    with open(txt_path, "w", encoding="utf-8") as f:
+        for seg in segments:
+            if seg["text_raw"]:
+                f.write(seg["text_raw"] + "\n\n")  # double line break for readability
+
+
+# These were used on the old script
+# May be handy if we do a fixed time sliced cues option
+def clean_text(text: str) -> str:
+    """
+    Normalize spaces and preserve line breaks in captions.
+
+    :param text: Raw VTT caption
+    :return: Cleaned text
+    """
+    return "\n".join(re.sub(r"\s+", " ", l).strip() for l in text.splitlines())
+
+
+def build_segment(source_id: str, idx: int, buffer: List[str], start: float, window: float, video_id: Optional[str]) -> Dict[str, Any]:
+    """
+    Build a transcript segment dictionary.
+
+    :param source_id: Canonical source ID
+    :param idx: Segment index
+    :param buffer: List of cue texts
+    :param start: Segment start time in seconds
+    :param window: Duration of segment
+    :param video_id: Optional YouTube ID
+    :return: Segment dictionary
+    """
+    end = round(start + window, 3)
+    seg = {
+        "id": f"{source_id}_{idx:05d}",
+        "source": source_id,
+        "segment_index": idx,
+        "start_time": round(start, 3),
+        "end_time": end,
+        "duration": round(end - start, 3),
+        "text_raw": " ".join(buffer).strip()
+    }
+    if video_id:
+        seg["video_id"] = video_id
+    return seg
+
+
+def fixed_slice_cues(cues: List[Dict[str, Any]], source_id: str, window: float, video_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    Slice cues into fixed-duration segments.
+
+    :param cues: List of cue dictionaries
+    :param source_id: Canonical source ID
+    :param window: Segment duration in seconds
+    :param video_id: Optional YouTube ID
     :return: List of segment dictionaries
     """
     segments = []
@@ -152,135 +380,125 @@ def slice_cues(cues: list, source_id: str, window_size: float, video_url: Option
     idx = 0
 
     for cue in cues:
-        # Initialize the first window on the first cue
         if window_start is None:
             window_start = cue["start"]
-
-        # If cue falls inside current window, accumulate text
-        if cue["start"] < window_start + window_size:
+        if cue["start"] < window_start + window:
             buffer.append(cue["text"])
         else:
-            # Flush the current window and start a new one
-            segments.append(
-                _build_segment(
-                    source_id, idx, buffer, window_start, window_size, video_url
-                )
-            )
+            segments.append(build_segment(source_id, idx, buffer, window_start, window, video_id))
             idx += 1
             buffer = [cue["text"]]
             window_start = cue["start"]
 
-    # Flush any remaining buffered text
     if buffer:
-        segments.append(
-            _build_segment(
-                source_id, idx, buffer, window_start, window_size, video_url
-            )
-        )
-
+        segments.append(build_segment(source_id, idx, buffer, window_start, window, video_id))
     return segments
-
-
-def _build_segment(source_id: str, idx: int, buffer: list, start: float, window_size: float, video_url: Optional[str],) -> dict:
-    """
-    Construct a canonical transcript segment object.
-
-    This function is intentionally isolated so that:
-    - Segment schema changes occur in exactly one place
-    - IDs remain stable and predictable
-    - Future metadata additions do not affect slicing logic
-
-    :param source_id: Canonical meeting/source identifier
-    :param idx: Segment index (0-based)
-    :param buffer: List of text fragments collected for this window
-    :param start: Window start time in seconds
-    :param window_size: Window duration in seconds
-    :param video_url: Optional base video URL
-    :return: Segment dictionary
-    """
-    start_time = round(start, 3)
-    end_time = round(start + window_size, 3)
-
-    seg = {
-        "id": f"{source_id}_{idx:05d}",
-        "source": source_id,
-        "segment_index": idx,
-        "start_time": start_time,
-        "end_time": end_time,
-        "duration": round(end_time - start_time, 3),
-        "text_raw": " ".join(buffer).strip(),
-    }
-
-    if video_url:
-        seg["video_url"] = f"{video_url}&t={int(start_time)}"
-
-    return seg
 
 
 def main() -> int:
     """
     Command-line entry point.
 
-    Handles argument parsing, file resolution, and batch processing.
-    Mirrors conventions used across existing Yatsee scripts to keep
-    pipeline behavior predictable.
+    Handles argument parsing, loading configs, iterating over VTT files,
+    writing TXT and segments files while respecting --force and verbose/quiet flags.
+
+    :return: Exit code (0=success, 1=failure)
     """
-    parser = argparse.ArgumentParser(
-        description="Convert VTT files into plain text and time-sliced transcript segments."
-    )
-    parser.add_argument("--vtt-input", "-i", required=True, help="Input .vtt file or directory")
-    parser.add_argument("--output-dir", "-o", default="processed_vtt", help="Output directory")
-    parser.add_argument("--create-txt", action="store_true", help="Generate plain text transcript (.txt) output")
-    parser.add_argument("--window", type=float, default=30.0, help="Window size in seconds")
-    parser.add_argument("--video-url", help="Base video URL for timestamp links (default: construct from filename)",)
-    parser.add_argument("--force", action="store_true", help="Overwrite existing files")
+    parser = argparse.ArgumentParser(description="Slice VTT into transcripts and segments")
+    parser.add_argument("-e", "--entity", help="Entity handle to process")
+    parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to global yatsee.toml")
+    parser.add_argument("-i", "--vtt-input", help="Input file or directory")
+    parser.add_argument("-o", "--output-dir", help="Directory to save transcripts")
+    parser.add_argument("--max-window", type=float, default=90.0, help="Hard upper limit on segment length")
+    parser.add_argument("--create-txt", action="store_true", help="Generate plain text transcript")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing outputs")
+    parser.add_argument("--verbose", action="store_true", help="Verbose output")
+    parser.add_argument("--quiet", action="store_true", help="Suppress output")
     args = parser.parse_args()
 
-    try:
-        vtt_files = get_files_list(args.vtt_input)
-    except (FileNotFoundError, ValueError) as e:
-        print(f"❌ {e}", file=sys.stderr)
-        return 1
+    # Determine input/output paths
+    entity_cfg = {}
+    if args.entity:
+        # Load entity config
+        try:
+            global_cfg = load_global_config(args.config)
+            entity_cfg = load_entity_config(global_cfg, args.entity)
+        except Exception as e:
+            print(f"❌ Config load failed: {e}", file=sys.stderr)
+            return 1
+    else:
+        # Require input if no entity is provided
+        if not args.vtt_input:
+            print("❌ Without --entity, --vtt-input must be defined", file=sys.stderr)
+            return 1
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    # Determine input/output directory based on entity or CLI override
+    input_dir = args.vtt_input or os.path.join(entity_cfg["data_path"], f"transcripts_{entity_cfg.get('transcription_model', 'small')}")
+    vtt_files_list = discover_files(input_dir, ".vtt")
+    if not vtt_files_list:
+        print("↪ No vtt input files found", file=sys.stderr)
+        return 0
 
-    for vtt_file in vtt_files:
+    # By default, output directory is the same as the input directory
+    output_directory = args.vtt_input or os.path.join(entity_cfg["data_path"], f"transcripts_{entity_cfg.get('transcription_model', 'small')}")
+    if not os.path.isdir(output_directory):
+        print(f"✓ Output directory will be created: {output_directory}", file=sys.stderr)
+        os.makedirs(output_directory, exist_ok=True)
+
+    download_tracker = os.path.join(entity_cfg["data_path"], "downloads", ".downloaded")
+    id_map = load_video_id_map(download_tracker)
+
+    # -----------------------------------------
+    # Make output files from .vtt input
+    # -----------------------------------------
+    for vtt_file in vtt_files_list:
         base_name = os.path.splitext(os.path.basename(vtt_file))[0]
-        txt_out = os.path.join(args.output_dir, f"{base_name}.txt")
-        seg_out = os.path.join(args.output_dir, f"{base_name}.segments.jsonl")
 
-        # Skip work unless explicitly told otherwise
-        if not args.force and os.path.exists(txt_out) and os.path.exists(seg_out):
-            print(f"↪ Skipping existing: {base_name}")
+        # Extract video ID if possible, otherwise generate placeholder
+        match = re.match(r"([A-Za-z0-9_-]{11})", base_name)
+        video_id = id_map.get(match.group(1).lower()) if match else None
+        if not video_id:
+            video_id = generate_placeholder_id(base_name)
+            if not args.quiet:
+                print(f"⚠ Placeholder ID for {base_name}: {video_id}")
+
+        try:
+            cues = read_vtt(vtt_file)
+            segments = consolidate_sentences(cues, max_window=args.max_window)
+            if not cues:
+                raise ValueError("No cues found in VTT")
+        except (OSError, webvtt.errors.MalformedFileError, ValueError) as e:
+            print(f"❌ Failed to read VTT '{vtt_file}': {e}", file=sys.stderr)
             continue
 
-        cues = read_vtt(vtt_file)
+        # Write TXT transcript if requested
         if args.create_txt:
-            write_txt(cues, txt_out)
+            txt_path = os.path.join(output_directory, f"{base_name}.txt")
+            try:
+                if not os.path.exists(txt_path) or args.force:
+                    write_txt(segments, txt_path)
+                    if not args.quiet:
+                        print(f"✓ Wrote {txt_path}")
+                elif not args.quiet:
+                    print(f"ℹ Skipped (exists): {txt_path}")
+            except OSError as e:
+                print(f"❌ Failed to write TXT '{txt_path}': {e}", file=sys.stderr)
 
-        # Determine video URL
-        if args.video_url:
-            video_base = args.video_url
-        else:
-            # Default: assume YouTube, use first part of filename as ID
-            yt_id = base_name.split(".")[0]
-            video_base = f"https://www.youtube.com/watch?v={yt_id}"
+        # Write segment JSONL safely
+        jsonl_path = os.path.join(output_directory, f"{base_name}.segments.jsonl")
+        try:
+            # segments = fixed_slice_cues(cues, base_name, args.window, video_id)
+            # if not segments:
+            #     raise ValueError("No segments generated")
 
-        segments = slice_cues(
-            cues,
-            base_name,
-            args.window,
-            video_base,
-        )
-
-        with open(seg_out, "w", encoding="utf-8") as f:
-            for seg in segments:
-                if seg["text_raw"]:
-                    f.write(json.dumps(seg, ensure_ascii=False) + "\n")
-
-        if args.create_txt:
-            print(f"✓ Wrote: {txt_out}")
-        print(f"✓ Wrote: {seg_out} ({len(segments)} segments)")
+            if not os.path.exists(jsonl_path) or args.force:
+                write_jsonl(segments, jsonl_path, base_name, video_id)
+                if not args.quiet:
+                    print(f"✓ Wrote {jsonl_path} ({len(segments)} segments)")
+            elif not args.quiet:
+                print(f"ℹ Skipped (exists): {jsonl_path}")
+        except (OSError, ValueError) as e:
+            print(f"❌ Failed to generate/write segments for '{vtt_file}': {e}", file=sys.stderr)
 
     return 0
 

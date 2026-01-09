@@ -1,60 +1,63 @@
 #!/usr/bin/env python3
 """
-YATSEE Transcript Summarizer
-----------------------------
+YATSEE Transcript Summarizer (Current Version)
+----------------------------------------------
 
 This tool summarizes transcripts (e.g., city council, committee meetings) using a local LLM via Ollama.
+Chunk summaries are now kept in memory only; no intermediate files are written to disk.
 
-usage examples:
+Usage examples:
   python yatsee_summarize_transcripts.py --model llama3 -i council_meeting_2025_06_01 --context "City Council Meeting - June 2025"
   python yatsee_summarize_transcripts.py --model mistral -i firehall_meeting_2025_05 --context "Fire Hall Proposal Discussion"
   python yatsee_summarize_transcripts.py --model mistral -i firehall_meeting_2025_05 --output-format markdown
 
-requirements:
+Requirements:
   - Ollama running locally: https://ollama.com
   - A supported model pulled locally (e.g. `ollama pull mistral`, `ollama pull llama3`)
 
-example models:
-  - `mistral`: small, fast, reliable (recommended for quick or resource-limited use)
-  - `llama3`: slower, but better at reasoning and context tracking (ideal for complex transcripts)
+Example models:
+  - `mistral`: small, fast, reliable (good for quick summarization or resource-limited setups)
+  - `llama3`: slower, but better at reasoning and context retention (ideal for complex transcripts)
 
-features:
-  - Auto-classifies meeting type using a short snippet of transcript + fallback regex based on filename
-  - Dynamically selects appropriate summarization prompts based on classification (e.g. city council, finance committee, etc.)
-  - Optionally override classification with manual prompt selection (--first-prompt, --second-prompt, --final-prompt)
-  - Summarizes long transcripts in chunks with automatic merging and optional multi-pass refinement
-  - Supports multi-pass summarization up to a defined depth (--max-passes)
-  - Works with streamed, local models via Ollama’s `/api/generate` endpoint
-  - Modular prompt system for various summary styles (overview, action items, detailed, exhaustive, final pass, etc.)
+Features:
+  - Auto-classifies meeting type using transcript snippet + optional fallback based on filename
+  - Dynamically selects summarization prompts based on meeting type (city council, finance committee, etc.)
+  - Optional manual prompt overrides for fine control (--first-prompt, --second-prompt, --final-prompt)
+  - Summarizes long transcripts in memory chunks with automatic merging
+  - Supports multi-pass summarization up to a configurable depth (--max-passes)
+  - Works entirely with local models via Ollama’s `/api/generate` endpoint
+  - Modular prompt system for summary styles (overview, action items, detailed, exhaustive, final pass, etc.)
+  - Memory-first design for privacy and performance — no intermediate files written to disk
 
-arguments:
+Arguments:
   -i / --input-dir         Directory or file path of transcripts to summarize
   --model                  Model to use (e.g., llama3, mistral)
-  --context                Optional human-readable meeting name, fallback is derived from filename
-  --output-dir             Directory to save summaries (default: ./summary/)
+  --context                Optional human-readable meeting name (used for summary clarity)
+  --output-dir             Directory to save final merged summaries (default: ./summary/)
   --output-format          'markdown' (default) or 'yaml'
-  --prompt                 Optional manual prompt ID override for first pass
+  --first-prompt           Optional manual prompt ID for first summarization pass
   --second-pass-prompt     Optional manual prompt ID for second summarization pass
-  --max-words              Approximate word count per chunk (default: 3500)
+  --max-words              Approximate word count per memory chunk (default: 3500)
   --max-passes             Maximum summarization passes to perform (default: 3)
   --disable-auto-classification  Disable automatic prompt selection based on meeting type
 
-outputs:
-  - Saves each chunk summary as: `<filename>_chunkN.yaml|md`
-  - Saves final merged summary as: `<filename>_final_summary.yaml|md`
-  - All output written to `--output-dir` (default: ./summary)
+Outputs:
+  - Only the final merged summary is written to `--output-dir` (default: ./summary/)
+  - Intermediate chunk summaries are kept in memory and merged; they are not written to disk
 
-prompt system:
+Prompt system:
   - Built-in prompt variants include: overview, action_items, detailed, more_detailed, most_detailed, final_pass_detailed
-  - Classification-aware mapping chooses best prompt variants based on detected meeting type
+  - Classification-aware mapping chooses the best prompt variant based on detected meeting type
   - Supports context-driven adaptation of summaries (via --context or filename fallback)
 
-notes:
-  - Designed for transcripts with structured civic dialogue: councils, committees, town halls
-  - Gender-neutral output style with summarization emphasis on motions, votes, decisions, and speaker intent
-  - Designed to be local-first and privacy-preserving — no cloud APIs required
+Notes:
+  - Designed for structured civic dialogue: councils, committees, town halls
+  - Gender-neutral output style with emphasis on motions, votes, decisions, and speaker intent
+  - Fully local-first and privacy-preserving — no cloud APIs required
 
-TODO: Entity Normalization & Community Feedback Loop
+TODO:
+  - Optional entity normalization
+  - Community feedback integration for improved summarization accuracy
 """
 
 import argparse
@@ -63,346 +66,12 @@ import re
 import sys
 import toml
 import json
+import yaml
 import requests
 import textwrap
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Any
 
 OLLAMA_SERVER_URL = "http://localhost:11434"
-
-# PROMPT_LOOKUP structure that maps meeting types to the recommended first and second pass prompts
-# Get IDs from the PROMPTS dictionary.
-PROMPT_LOOKUP = {
-    "city_council": {
-        "first": "most_detailed",
-        "multi": "structure_preserving",
-        "final": "civic_scan"
-},
-    "finance_committee": {
-        "first": "finance_committee_detailed",
-        "multi": "structure_preserving",
-        "final": "finance_committee_final"
-    },
-    "committee_of_the_whole": {
-        "first": "committee_meeting_detailed",
-        "multi": "structure_preserving",
-        "final": "committee_meeting_final"
-    },
-    "zoning_committee": {
-        "first": "more_detailed",
-        "multi": "structure_preserving",
-        "final": "committee_meeting_final"
-    },
-    "general": {
-        "first": "more_detailed",
-        "multi": "structure_preserving",
-        "final": "final_pass_detailed"
-    }
-}
-
-# Define PROMPTS dictionary to hold different prompt templates
-PROMPTS = {
-    "overview": (
-        "You are an assistant that produces structured meeting minutes from transcripts.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "Produce a concise, high-level meeting summary from the transcript.\n"
-        "Use they/them pronouns unless gender is explicit.\n"
-        "Group related content; exclude non-substantive or empty sections.\n"
-        "Avoid repeating headers.\n"
-        "Use plain numbers, not Roman numerals."
-    ),
-    "action_items": (
-        "You are an assistant that produces structured meeting minutes from transcripts.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "Extract all action items, motions, decisions, and follow-ups from the transcript.\n"
-        "Use they/them pronouns unless gender is explicit.\n"
-        "Focus on actionable content only.\n"
-        "Skip commentary, informal remarks, and empty sections.\n"
-        "Avoid repeating headers.\n"
-        "Use plain numbers, not Roman numerals."
-    ),
-    "roll_call_only": (
-        "You are an assistant that produces structured meeting minutes from transcripts.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "Extract attendance from transcript.\n"
-        "List 'Present' and 'Absent' names.\n"
-        "Infer attendance if no roll call.\n"
-        "Exclude titles unless needed.\n"
-        "Skip irrelevant commentary and empty sections.\n"
-        "Avoid repeating headers.\n"
-        "Use plain numbers, not Roman numerals."
-    ),
-    "vote_log_only": (
-        "You are an assistant that produces structured meeting minutes from transcripts.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "List motions, proposers, seconders, and vote results.\n"
-        "Format: 'Motion to [action], made by [name], seconded by [name] – Passed [X–Y]'.\n"
-        "Include individual votes if roll call.\n"
-        "Skip procedural or unrelated comments.\n"
-        "Omit empty sections.\n"
-        "Avoid repeating headers.\n"
-        "Use plain numbers, not Roman numerals."
-    ),
-    "finance_meeting_summary": (
-        "You produce structured minutes of finance or budget-related meetings.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "Use they/them pronouns unless gender is explicit.\n\n"
-        "Summarize financial topics in clear sections:\n"
-        "- Budget proposals, allocations, transfers, amendments\n"
-        "- Capital improvement fund discussions\n"
-        "- Grant approvals, expenses, revenue reports\n"
-        "- Voting records and finance-related motions\n"
-        "- Include a summary header with attendees, location, date\n"
-        "- Exclude non-financial discussions unless relevant\n"
-        "- Omit empty or non-substantive sections (e.g., 'none,' 'N/A')\n"
-        "- Avoid repeating headers (attendees, location, date)\n"
-        "- Use plain numbers, not Roman numerals."
-    ),
-    "finance_committee_detailed": (
-        "You produce detailed, structured minutes of finance or budget committee meetings from transcripts.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "Use they/them pronouns unless gender is explicit.\n\n"
-        "Focus on fiscal matters and oversight. Include:\n"
-        "- Committee name, attendees, location, date\n"
-        "- Budget discussions, allocations, audits, expenditures\n"
-        "- Proposed budget amendments, rationale, vote outcomes\n"
-        "- Motions, approvals (who made/seconded, vote tallies)\n"
-        "- Grants, contracts, loans, financial forecasts\n"
-        "- Member concerns (risk, liabilities, transparency)\n"
-        "- Recommendations to city council or others\n"
-        "- Clearly label sections: Budget Amendments, Audit Reports, Approvals, Follow-ups\n"
-        "- Maintain chronological flow\n"
-        "- Group related items (e.g., multiple grants)\n"
-        "- Include extended debate or dissent if relevant\n"
-        "- Exclude 'N/A' or irrelevant procedural chatter\n"
-        "- Omit empty or non-substantive sections (e.g., 'none', 'N/A')\n"
-        "- Avoid repeating headers (attendees, location, date)\n"
-        "- Use plain numbers, not Roman numerals."
-    ),
-    "finance_committee_final": (
-        "You are a civic assistant generating detailed markdown summaries from finance or budget-related meetings.\n\n"
-        "Context: {context}\n\n"
-        "Summaries:\n{text}\n\n"
-        "Instructions:\n"
-        "- Merge the content into a single, well-structured summary organized by topic or department.\n"
-        "- Highlight all budget amendments, proposed cuts/increases, reallocations, and any funding shifts.\n"
-        "- Clearly list each grant, program, or revenue source mentioned. Include names, amounts, match requirements, and intended use.\n"
-        "- If a fund or budget line is being adjusted, note the original and revised amounts if mentioned.\n"
-        "- Attribute concerns or proposals to specific officials when clearly named; otherwise use general labels like 'a committee member said...'.\n"
-        "- Include all formal motions and votes, but recognize that many discussions may not result in a vote — document those discussions anyway.\n"
-        "- Avoid repeating boilerplate like roll call or approval of prior minutes unless notable.\n"
-        "- Use markdown headers to separate topics (e.g., 'Grants and Funding', 'Budget Amendments', 'Departmental Requests', etc).\n"
-        "- Maintain a neutral and professional tone throughout.\n"
-        "- Do not collapse multiple topics into a single vague bullet — retain detail even for small funding items."
-    ),
-    "committee_meeting_summary": (
-        "You are an assistant producing structured summaries of committee meetings.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "Use gender-neutral pronouns (they/them) unless a speaker’s gender is explicit.\n\n"
-        "Summarize the meeting by topic or subcommittee focus:\n"
-        "- Identify presenters, topics, motions, and recommendations.\n"
-        "- Include outcomes, follow-ups, and any items forwarded to city council.\n"
-        "- Briefly note informal or public comments only if relevant.\n"
-        "- Begin with a summary of attendees, location, and date.\n"
-        "- Omit sections with no substantive content (e.g., 'none', 'N/A').\n"
-        "- Avoid repeating headers (attendees, location, date) within the meeting.\n"
-        "- Use plain numbers (e.g., '2') instead of Roman numerals."
-    ),
-    "committee_meeting_detailed": (
-        "You are an assistant producing structured minutes of committee meetings from transcripts.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "Use gender-neutral pronouns (they/them) unless a speaker’s gender is explicit.\n\n"
-        "Provide a detailed summary organized by agenda item or topic.\n"
-        "- Include committee name, attendees, location, and date.\n"
-        "- Cover key discussion points and speakers.\n"
-        "- Document motions made, seconded, and outcomes.\n"
-        "- Include votes with counts or roll call results when available.\n"
-        "- If a motion 'passes' here, it means it is 'Recommended to City Council' or 'Moved Forward', NOT 'Approved'.\n"
-        "- Highlight notable quotes influencing decisions.\n"
-        "- Note recommendations to higher bodies (e.g., city council).\n"
-        "- List follow-ups or pending reviews.\n"
-        "- Briefly summarize informal remarks or public comments only if relevant.\n"
-        "- Use clear, plain headers by topic or agenda.\n"
-        "- Preserve event sequence and meeting flow.\n"
-        "- Exclude 'N/A', empty, or irrelevant sections.\n"
-        "- Avoid repeating headers (attendees, location, date) within the same meeting.\n"
-        "- Use plain numbers, not Roman numerals."
-    ),
-    "committee_meeting_final": (
-        "You are an assistant that synthesizes committee meeting summaries into a unified, readable markdown report.\n\n"
-        "Context: {context}\n\n"
-        "Summaries:\n{text}\n\n"
-        "Instructions:\n"
-        "- Organize by **agenda item or major discussion topic**, not speaker order.\n"
-        "- Include **motions and votes**, but only if clearly described — avoid fabricating counts.\n"
-        "- Reflect **disagreements, concerns, or points of confusion** clearly and neutrally.\n"
-        "- If attendees raise issues without resolution, group them under 'Discussion Points' or 'Open Questions'.\n"
-        "- Do **not** repeat metadata (date, location) more than once.\n"
-        "- Preserve key comments **only** if they clarify issues, provide insight, or explain a stance.\n"
-        "- Remove redundancy across chunks; combine repeated information.\n"
-        "- Use markdown formatting: clear headers, bullet points, and clean lists.\n"
-        "- Avoid robotic phrasing or repeating 'Alderman X said...' unless it adds value.\n"
-        "- If a motion is described in multiple ways, preserve the **clearest or most complete version**.\n"
-        "- If a motion 'passes' here, it means it is 'Recommended to City Council' or 'Moved Forward', NOT 'Approved'."
-    ),
-    "detailed": (
-        "You are an assistant that produces structured meeting minutes from transcripts.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "Use gender-neutral pronouns (they/them) unless a speaker’s gender is explicit.\n\n"
-        "Provide a detailed, structured summary including agenda items, major topics, speakers, motions, and vote outcomes.\n"
-        "- Briefly summarize prayers or informal remarks.\n"
-        "- Group related discussions logically.\n"
-        "- Exclude empty or non-substantive sections (e.g., 'none', 'N/A').\n"
-        "- Avoid repeating headers (attendees, location, date) within the same meeting.\n"
-        "- Use plain numbers instead of Roman numerals."
-    ),
-    "more_detailed": (
-        "You are an assistant that produces structured meeting minutes from transcripts.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "Use gender-neutral pronouns (they/them) unless a speaker’s gender is explicit.\n\n"
-        "Provide a detailed summary organized by agenda item or topic.\n"
-        "- For each topic, include key speakers, main points, quotes, motions (with who made/seconded), vote counts, and follow-ups.\n"
-        "- Begin with a meeting header: attendees, location, and date.\n"
-        "- Preserve topic order and discussion flow.\n"
-        "- Briefly summarize prayers or invocations.\n"
-        "- Combine related discussions for clarity.\n"
-        "- Exclude empty or non-substantive sections (e.g., 'none', 'N/A').\n"
-        "- Avoid repeating headers within the same meeting.\n"
-        "- Use plain numbers instead of Roman numerals."
-    ),
-    "most_detailed": (
-        "You are a meeting summarizer producing clear, structured markdown summaries from transcripts.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "Instructions:\n"
-        "- Summarize all agenda items, discussions, and decisions.\n"
-        "- If a vote outcome is mentioned anywhere in the transcript, it must be included.\n"
-        "- Do not omit a vote because it seems routine or uncontested.\n"
-        "- Include motions, who made and seconded them, and vote outcomes. If a roll call vote is taken, list how each person voted.\n"
-        "- Group content under clear, topical headers (e.g., Ordinance Changes, Public Funding, Planning and Zoning).\n"
-        "- Use only the following section headers when applicable:\n"
-        "    1. Ordinances and Resolutions\n"
-        "    2. Contracts and Spending\n"
-        "    3. Property and Development\n"
-        "    4. Appointments\n"
-        "    5. Public Comment\n"
-        "    6. Other Discussion\n"
-        "- Identify speakers by name or title *only if clearly stated*. Do not guess or combine similar names (e.g., 'Wayne' and 'Director Duckman') unless explicitly linked.\n"
-        "- If a speaker is unnamed, refer to them generically (e.g., 'a council member said...').\n"
-        "- Use quotes sparingly and only when they add clarity or emphasis. Otherwise, paraphrase naturally.\n"
-        "- Group content under clear, natural section headers. Avoid copying transcript labels like 'Item Number Four.'\n"
-        "- Never refer to an item by number alone (e.g., 'Item 4'). Always provide the topic (e.g., 'Item 4: [Agenda Topic Name]').\n"
-        "- Maintain a neutral, civic tone. Avoid robotic phrasing or repetition.\n"
-        "- Use plain numbers (e.g., '2' instead of 'II').\n"
-        "- Avoid assuming gender. Use gendered pronouns only when unambiguous from the transcript."
-    ),
-    "structure_preserving": (
-        "You are a meeting summarizer producing clear, structured markdown summaries from transcripts.\n\n"
-        "Context: {context}\n\n"
-        "Transcript:\n{text}\n\n"
-        "Instructions:\n"
-        "- Summarize all agenda items, discussion points, and decisions without over-compressing.\n"
-        "- If a vote outcome is mentioned anywhere in the transcript, it must be included.\n"
-        "- Retain detail on motions, who made and seconded them, and vote outcomes. If a roll call vote is included, list individual votes.\n"
-        "- Preserve attribution when names or titles are explicitly stated. Refer to unnamed speakers generically (e.g., 'a resident said...').\n"
-        "- Group content under natural, informative section headers (e.g., 'Public Comments,' 'Budget Discussion'). Avoid generic item labels.\n"
-        "- Capture meaningful quotes or paraphrased statements that reflect public sentiment or council debate.\n"
-        "- Include resolution and ordinance numbers when mentioned and summarize what each one does.\n"
-        "- Avoid unnecessary compression; this is an intermediate summary meant to preserve useful structure and fidelity for a later final pass.\n"
-        "- Maintain a civic, neutral tone. Do not editorialize. Avoid assumptions about speaker identity or intent.\n"
-        "- Use plain numbers (e.g., '2' instead of 'II').\n"
-        "- Format output in clean, readable Markdown. Use bullet points or subheaders where helpful."
-    ),
-    "civic_scan": (
-        "You are an assistant that produces concise, high-level civic meeting summaries from transcripts.\n\n"
-        "**Context:** {context}\n\n"
-        "**Transcript:**\n{text}\n\n"
-        "**Instructions:**\n"
-        "- Output must be formatted in **Markdown**.\n"
-        "- Use **plain Arabic numerals (1, 2, 3...)** for section headers. **Do not use Roman numerals.**\n"
-        "- **CRITICAL:** Never refer to an item by number alone (e.g., 'Item 4'). Always provide the topic (e.g., 'Item 4: [Agenda Topic Name]').\n"
-        "- Group content under clear, topical headers (e.g., Ordinance Changes, Public Funding, Planning and Zoning).\n"
-        "- Use only the following section headers when applicable:\n"
-        "    1. Ordinances and Resolutions\n"
-        "    2. Contracts and Spending\n"
-        "    3. Property and Development\n"
-        "    4. Appointments\n"
-        "    5. Public Comment\n"
-        "    6. Other Discussion\n"
-        "- If a vote outcome is mentioned anywhere in the transcript, it must be included.\n"
-        "- Capture **all motions and votes**, including failed votes, first readings, deferrals, and procedural attempts.\n"
-        "- Keep each attempt distinct, even if a later vote passes the item. Show the sequence of first reading, second reading, and final vote.\n"
-        "- Include motions, who made and seconded them, and vote outcomes for every vote mentioned.\n"
-        "- Surface procedural discussion and debate, especially if it indicates disagreement, division, or confusion.\n"
-        "- Do not collapse repeated votes into a single final outcome. Preserve the full procedural history.\n"
-        "- Flag items that are routine but still voted on, so nothing is silently omitted.\n"
-        "- Focus on real civic impact: surface ordinance changes, grant activity, public funding, zoning decisions, infrastructure/budget items, emotionally charged issues, controversies, and unresolved matters.\n"
-        "- Include **brief quotes** when they express public sentiment, concern, or disagreement.\n"
-        "- Flag votes, funding amounts, appointments, and any item likely to impact residents or warrant follow-up.\n"
-        "- Exclude filler or procedural commentary unless it affects transparency, accountability, or trust.\n"
-        "- Treat the following as high-priority if present, in this order:\n"
-        "    1. Ordinances and resolutions\n"
-        "    2. Votes involving money, property, or contracts\n"
-        "    3. Appointments or removals\n"
-        "    4. Public comments expressing concern or disagreement\n"
-        "    5. Deferred or unresolved items\n"
-        "- Use **they/them pronouns** unless gender is clearly stated.\n"
-        "- Keep the summary skimmable but comprehensive for an engaged citizen audience.\n"
-        "- Be consistent and avoid repeating section headers by merging topics where applicable.\n"
-        "- **Do NOT include any internal notes, meta-commentary, explanations of how this summary was created, or references to the summarization process.**\n"
-        "- Never include meta-commentary, task acknowledgements, explanations, or conversational filler (e.g., ‘let me know if…’, ‘here is the summary’, ‘this concludes'). Output only the summary.\n"
-        "- Output must consist only of section headers and factual bullet points derived from the transcript."
-    ),
-    "final_pass_detailed": (
-        "You are an assistant that synthesizes structured summaries of public meetings into a unified, readable markdown file.\n\n"
-        "Context: {context}\n\n"
-        "Summaries:\n{text}\n\n"
-        "Instructions:\n"
-        "- Combine all chunked summaries into a cohesive markdown file organized by agenda item or topic.\n"
-        "- Retain all motions, including who made and seconded them, the vote result, and vote breakdowns if present.\n"
-        "- Preserve all ordinance/resolution numbers, titles, subjects, amounts, contractors, and related agency names.\n"
-        "- Avoid duplicating items in multiple sections — instead consolidate detailed discussion with motion outcome.\n"
-        "- Include a dedicated 'Motions and Votes Summary' section at the end with a clear list of all actions taken.\n"
-        "- Do not omit public comments; summarize each speaker’s topic, concern, or praise with clarity.\n"
-        "- Accurately attribute remarks only when names or roles are clearly stated. Use 'a speaker' or 'a council member' otherwise.\n"
-        "- If multiple individuals have the same last name, use title and full name to disambiguate (e.g., 'Mayor Jodi Miller' vs. 'Scott Miller').\n"
-        "- Use markdown headings to match the meeting flow, and include bullet points for clarity where appropriate.\n"
-        "- Keep a professional, neutral tone throughout — do not invent dialogue or fill in missing attribution.\n"
-        "- Use plain numbers (e.g., '2'), avoid duplicate metadata (e.g., meeting date), and do not repeat sections.\n"
-        "- Omit any section header entirely if no relevant content exists.\n"
-        "- **Do NOT include any internal notes, meta-commentary, explanations of how this summary was created, or references to the summarization process.**\n"
-        "- Never include meta-commentary, task acknowledgements, explanations, or conversational filler (e.g., ‘let me know if…’, ‘here is the summary’, ‘this concludes'). Output only the summary.\n"
-        "- Output must consist only of section headers and factual bullet points derived from the transcript."
-    )
-}
-
-CLASSIFIER_PROMPT = {
-    "classifier": (
-    "You are a routing assistant. Classify this meeting to select the correct summary template.\n\n"
-    "Context: {context}\n\n"
-    "Transcript Snippet:\n{text}\n\n"
-    "Based on context and structure of the snippet, classify as **one** of the following categories:\n"
-    "- city_council\n"
-    "- finance_committee\n"
-    "- committee_of_the_whole\n"
-    "- zoning_committee\n"
-    "- general\n\n"
-    "Analysis Rules:\n"
-    "1. **Finance Priority:** If Context mentions 'Finance', 'Budget', or 'Appropriation', classify as 'finance_committee' (even if it says 'Committee of the Whole').\n"
-    "2. **COW vs Council:** If Context says 'Committee of the Whole', classify as 'committee_of_the_whole'. Only classify as 'city_council' if the Context indicates a Regular/Special Council meeting.\n"
-    "3. **Zoning:** If Context mentions 'Zoning' or 'Planning', classify as 'zoning_committee'.\n\n"
-    "Return only the classification value as plain text. Do not include explanations or additional commentary."
-    )
-}
 
 
 def classify_meeting(session: requests.Session, model: str, prompt: str) -> str:
@@ -450,8 +119,102 @@ def classify_meeting(session: requests.Session, model: str, prompt: str) -> str:
         raise RuntimeError(f"Error during meeting classification request: {e}")
 
 
+def load_global_config(path: str) -> Dict[str, Any]:
+    """
+    Load the global YATSEE configuration file.
+
+    :param path: Path to the global TOML config file
+    :return: Parsed global configuration as a dictionary
+    :raises FileNotFoundError: If the file does not exist
+    :raises ValueError: If the TOML cannot be parsed
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Global configuration file not found: {path}")
+    try:
+        return toml.load(path)
+    except Exception as exc:
+        raise ValueError(f"Failed to parse global config '{path}': {exc}") from exc
+
+
+def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any]:
+    """
+    Load and merge entity-specific configuration with global defaults.
+
+    :param global_cfg: Global configuration dictionary
+    :param entity: Entity handle to load (e.g., 'us_ca_fresno_city_council')
+    :return: Merged entity configuration dictionary
+    :raises KeyError: If entity is not defined in global config
+    :raises FileNotFoundError: If local entity config is missing
+    """
+    reserved_keys = {"settings", "meta"}
+
+    entities_cfg = global_cfg.get("entities", {})
+    if entity not in entities_cfg:
+        raise KeyError(f"Entity '{entity}' not defined in global config")
+
+    system_cfg = global_cfg.get("system", {})
+    root_data_dir = os.path.abspath(system_cfg.get("root_data_dir", "./data"))
+    local_path = os.path.join(root_data_dir, entity, "config.toml")
+    if not os.path.exists(local_path):
+        raise FileNotFoundError(f"Local config for entity '{entity}' not found at: {local_path}")
+
+    local_cfg = toml.load(local_path)
+
+    merged = {
+        "entity": entity,
+        "root_data_dir": root_data_dir,
+        **system_cfg,
+        **entities_cfg.get(entity, {}),
+    }
+
+    for key, value in local_cfg.items():
+        if key in reserved_keys:
+            merged.update(value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def discover_files(input_path: str, supported_exts, exclude_suffix: str = None) -> List[str]:
+    """
+    Collect files from a directory or single file based on allowed extensions,
+    optionally excluding files with a specific suffix.
+
+    :param input_path: Path to directory or file
+    :param supported_exts: Supported file extensions (str or tuple)
+    :param exclude_suffix: Optional suffix to exclude (e.g., '.punct.txt')
+    :return: Sorted list of valid file paths
+    :raises FileNotFoundError: If path does not exist
+    :raises ValueError: If file extension is unsupported
+    """
+    files: List[str] = []
+
+    if os.path.isdir(input_path):
+        for f in os.listdir(input_path):
+            full = os.path.join(input_path, f)
+            if (
+                os.path.isfile(full)
+                and f.lower().endswith(supported_exts)
+                and (exclude_suffix is None or not f.lower().endswith(exclude_suffix))
+            ):
+                files.append(full)
+    elif os.path.isfile(input_path):
+        if input_path.lower().endswith(supported_exts) and (
+            exclude_suffix is None or not input_path.lower().endswith(exclude_suffix)
+        ):
+            files.append(input_path)
+        else:
+            raise ValueError(f"Unsupported file extension or excluded: {os.path.basename(input_path)}")
+    else:
+        raise FileNotFoundError(f"Path not found: {input_path}")
+
+    return sorted(files)
+
+
 def extract_context_from_filename(filename, extra_note=None):
-    """Extracts a human-friendly meeting context from a transcript filename."""
+    """
+    Extracts a human-friendly meeting context from a transcript filename.
+    """
     # Just the basename (strip path)
     base = os.path.basename(filename)
 
@@ -465,7 +228,7 @@ def extract_context_from_filename(filename, extra_note=None):
     base = base.replace("_", " ").replace("-", " ")
 
     # Try to extract components
-    meeting_match = re.match(r"(.*?) (\d{1,2}) (\d{1,2}) (\d{2,4})", base)
+    meeting_match = re.match(r"(.*?) (\d{1,2})[ -](\d{1,2})[ -](\d{2,4})", base)
     if meeting_match:
         kind = meeting_match.group(1).strip().title()
         month = int(meeting_match.group(2))
@@ -512,26 +275,6 @@ def calculate_cost_openai_gpt4o(input_tokens: int, output_tokens: int) -> float:
     return round(input_cost + output_cost, 4)
 
 
-def filter_transcript_file(path_list: list[str]) -> list[str]:
-    """
-    Resolve which file to use for summarization: .out or .txt.
-    .out files will override .txt files in precedence
-    .out file extensions are preferred but fallback to .txt
-
-    :param path_list: Base name of the meeting file (no extension)
-    :return: List of resolved file paths
-    """
-    files = []
-
-    for path in path_list:
-        if path.lower().endswith(".out"):
-            files.append(path)
-        elif path.lower().endswith(".txt"):
-            files.append(path)
-
-    return files
-
-
 def get_files_list(path: str) -> list[str]:
     """
     Collect a list of .txt and .out files from a directory or single file path.
@@ -574,7 +317,7 @@ def get_files_list(path: str) -> list[str]:
     return txt_files
 
 
-def prepare_text_chunk(text: str, max_tokens: int = 2500, overlap_tokens: int = 400) -> List[str]:
+def prepare_text_chunk(text: str, max_tokens: int = 2500, overlap_tokens: int | None = None) -> List[str]:
     """
     Split text into overlapping chunks by token count using a fixed sliding window.
 
@@ -583,6 +326,8 @@ def prepare_text_chunk(text: str, max_tokens: int = 2500, overlap_tokens: int = 
     :param overlap_tokens: Number of tokens to overlap between chunks
     :return: List of text chunks (strings)
     """
+    if overlap_tokens is None:
+        overlap_tokens = min(int(max_tokens * 0.1), 800)  # max 800 tokens overlap
 
     tokens = text.split()
     total_tokens = len(tokens)
@@ -647,7 +392,7 @@ def prepare_text_chunk_sentence(text: str, max_tokens: int = 3000) -> list[str]:
     return chunks
 
 
-def summarize_transcript(session: requests.Session, model: str, prompt: str = "detailed") -> str:
+def summarize_transcript(session: requests.Session, model: str, prompt: str = "detailed", num_ctx: int = 8192) -> str:
     """
     Use a local Ollama LLM to summarize transcript text.
     Ollama returns streaming JSON objects, one per line
@@ -655,6 +400,7 @@ def summarize_transcript(session: requests.Session, model: str, prompt: str = "d
     :param session: Pass in connection session
     :param model: Name of the model to use (e.g., 'llama3', 'mistral')
     :param prompt: Type of prompt to use (key from PROMPTS)
+    :param num_ctx: Max context window that a model supports
     :return: The generated summary as a string
     :raises RuntimeError: On HTTP or JSON streaming errors
     """
@@ -664,7 +410,7 @@ def summarize_transcript(session: requests.Session, model: str, prompt: str = "d
         "prompt": prompt,
         "temperature": 0.2,
         "options": {
-            "num_ctx": 32768
+            "num_ctx": num_ctx
         }
     }
 
@@ -699,17 +445,15 @@ def write_summary_file(summary: str, basename: str, output_dir: str, fmt: str = 
     :param fmt: Output format: "markdown" (default) or "yaml"
     :return: True if file written successfully, False otherwise
     """
+    filename = f"{basename}.{'md' if fmt == 'markdown' else 'yaml'}"
+    out_path = os.path.join(output_dir, filename)
+
     try:
-        filename = f"{basename}.summary.{ 'md' if fmt == 'markdown' else 'yaml' }"
-        out_path = os.path.join(output_dir, filename)
-
-        if fmt == "markdown":
-            content = f"# Summary: {basename}\n\n{summary.strip()}\n"
-        else:  # YAML default
-            content = f"summary: |\n  " + summary.strip().replace("\n", "\n  ") + "\n"
-
         with open(out_path, "w", encoding="utf-8") as f:
-            f.write(content)
+            if fmt == "markdown":
+                f.write(f"# Summary: {basename}\n\n{summary.strip()}\n")
+            else:  # YAML
+                yaml.safe_dump({"summary": summary}, f, sort_keys=False)
 
         return True
 
@@ -719,6 +463,31 @@ def write_summary_file(summary: str, basename: str, output_dir: str, fmt: str = 
         print(f"❌ Unexpected error during write: {e}")
 
     return False
+
+
+def write_chunk_files(chunks: list[str], output_dir: str, meeting_type: str, base_name: str) -> bool:
+    """
+    Save transcript chunks to disk under organized directory structure.
+    :param chunks: List of text chunks to write
+    :param output_dir: Base directory for output files
+    :param meeting_type: Meeting category label (e.g., 'city_council')
+    :param base_name: Base filename (without extension) for chunk files
+    :return: True if all chunks saved successfully, False otherwise
+    """
+    try:
+        chunks_path = os.path.join(output_dir, "chunks", meeting_type, base_name)
+        os.makedirs(chunks_path, exist_ok=True)
+
+        for idx, chunk_text in enumerate(chunks):
+            chunk_filename = f"{base_name}_part{idx:02d}.txt"
+            chunk_path = os.path.join(chunks_path, chunk_filename)
+            with open(chunk_path, "w", encoding="utf-8") as f:
+                f.write(chunk_text)
+        return True
+    except Exception as e:
+        print(f"Error saving chunks: {e}")
+        return False
+
 
 def generate_known_speakers_context(speaker_matches: dict) -> List[str] | str:
     """
@@ -829,14 +598,33 @@ def build_name_permutations(data_config: dict) -> dict:
     return name_permutations
 
 
-def get_nested_config(config: dict, path: str) -> dict:
+def validate_prompt(prompt_name: str | None, label: str, available_prompts: dict) -> None:
     """
-    Given a dot-separated path (e.g. 'country.US.state.IL.city_council'),
-    traverse the config dictionary to return the nested sub-config.
+    Validate that a requested prompt exists in the loaded prompt set.
+
+    This function performs validation only and has no side effects:
+    - No printing
+    - No exiting
+    - No mutation of global state
+
+    The caller (typically main()) is responsible for catching exceptions
+    and presenting user-facing error messages.
+
+    :param prompt_name: The prompt identifier provided via CLI (may be None)
+    :param label: Human-readable label used for error context (e.g. "first prompt")
+    :param available_prompts: Dictionary of available prompt templates
+    :raises ValueError: If the prompt name is defined but not found
     """
-    for part in path.split("."):
-        config = config[part]
-    return config
+    if not prompt_name:
+        # No prompt explicitly requested; nothing to validate
+        return
+
+    if prompt_name not in available_prompts:
+        valid_keys = ", ".join(sorted(available_prompts.keys()))
+        raise ValueError(
+            f"Invalid {label} '{prompt_name}'. "
+            f"Available prompts: {valid_keys}"
+        )
 
 
 def main():
@@ -844,100 +632,160 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
         Summarize city council, committee, or other civic meeting transcripts using a local Ollama language model.
-
+        
         This tool reads transcript files (either a single file or an entire directory), auto-classifies the meeting 
         type (e.g., city_council, finance_committee), and summarizes using a multi-pass pipeline with structured prompts.
-
+        Chunking is handled in memory; intermediate chunks are not written to disk.
+        
         Features:
           - Automatic classification of meeting type using transcript context + fallback filename heuristics
           - Dynamic prompt selection per meeting type (e.g., final_pass_detailed for council, financial_summary for finance)
           - Manual override of prompt type(s) for custom workflows
-          - Recursive summarization of long transcripts via intelligent chunking and reprocessing
+          - Recursive summarization of long transcripts via intelligent in-memory chunking and reprocessing
           - Multi-pass refinement up to a configurable depth (default: 3)
           - Optional disabling of auto classification with `--disable-auto-classification`
           - Output in either YAML or Markdown format
           - Token usage tracking with cost estimation (for reference if used with paid APIs in future)
 
         Example usage:
-          python yatsee_summarize_transcripts.py --model llama3 -i normalized/ --context "City Council - June 2025"
-          python yatsee_summarize_transcripts.py -m mistral -i transcripts/ -o summaries/ --output-format markdown
+          python yatsee_summarize_transcripts.py -e defined_entity
+          python yatsee_summarize_transcripts.py --model llama3:latest -i normalized/ --context "City Council - June 2025"
+          python yatsee_summarize_transcripts.py -m mistral:latest -i transcripts/ -o summaries/ --output-format markdown
           python yatsee_summarize_transcripts.py -m gemma:2b -i finance/ --disable-auto-classification --prompt detailed
-
+        
         Input:
-          - Single file or directory of `.txt` or `.out` files
+          - Single file or directory of `.txt` files
           - Context string (optional) used to enhance prompt relevance
           - Models must be locally pulled via `ollama pull` (e.g., `llama3`, `mistral`)
-
+        
         Output:
-          - Individual chunk summaries saved with `_chunkN` suffix
-          - Final combined summary saved as `_final_summary.md` or `.yaml`
+          - Final combined summary saved as `_final_summary.md` or `.yaml` in the output directory
+          - Intermediate chunks are processed in memory only and merged automatically
           - Written to output directory (`--output-dir`, default: ./summary)
-
+        
         This tool is privacy-respecting, fully local, and optimized for transparency, civic clarity, and reproducibility.
         """)
     )
 
-    parser.add_argument("-m", "--model", help="Model name (e.g. 'llama3:latest', 'mistral:latest', 'mistral-nemo:latest', gemma:2b)")
+    parser.add_argument("-e", "--entity", help="Entity handle to process")
+    parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to global yatsee.toml")
     parser.add_argument("-i", "--txt-input", help="Path to a transcript file or directory (supports .txt or .out)")
-    parser.add_argument("-c", "--context", default="", help="Optional meeting context to guide summarization")
-    parser.add_argument("-o", "--output-dir", default="summary", help="Directory to save the summary output (Default: summary)")
+    parser.add_argument("-o", "--output-dir", help="Directory to save the summary output (Default: summary)")
+    parser.add_argument("-m", "--model", help="Model name (e.g. 'llama3:latest', 'mistral:latest', 'mistral-nemo:latest', gemma:2b)")
     parser.add_argument("-f", "--output-format", choices=["markdown", "yaml"], default="markdown", help="Summary output format (Default: markdown)")
-    parser.add_argument("-w", "--max-words", type=int, default=13500, help="Word count above which transcript is chunked (Default: 3500)")
-    parser.add_argument("-t", "--max-tokens", type=int, default=16500, help="Approximate max tokens per chunk (Default: 2500)")
+    parser.add_argument("-j", "--job-type", choices=["summary", "research"], default="summary", help="Job type to define prompts(Default: summary)")
+    parser.add_argument("-w", "--max-words", type=int, help="Word count above which transcript is chunked (Default: 3500)")
+    parser.add_argument("-t", "--max-tokens", type=int, help="Approximate max tokens per chunk (Default: 2500)")
     parser.add_argument("-p", "--max-pass", type=int, default=3, help="Max number of iterations for multi-pass refinement (Default: 3)")
     parser.add_argument("-d", "--disable-auto-classification", action="store_true", help="Disable auto classification. Make sure to set first and second pass prompts")
-    parser.add_argument("--first-prompt", choices=PROMPTS.keys(), help="Prompt type to use for summarization (Only used when auto classification is disabled)")
-    parser.add_argument("--second-prompt", choices=PROMPTS.keys(), help="Prompt type for second pass summarization of chunk summaries (Only used when auto classification is disabled)")
-    parser.add_argument("--final-prompt", choices=PROMPTS.keys(), help="Prompt type for final pass summarization of chunk summaries (Only used when auto classification is disabled)")
+    parser.add_argument("--first-prompt", help="Prompt type to use for summarization (Only used when auto classification is disabled)")
+    parser.add_argument("--second-prompt", help="Prompt type for second pass summarization of chunk summaries (Only used when auto classification is disabled)")
+    parser.add_argument("--final-prompt", help="Prompt type for final pass summarization of chunk summaries (Only used when auto classification is disabled)")
+    parser.add_argument("--context", default="", help="Optional meeting context to guide summarization")
     parser.add_argument("--print-prompts", action="store_true", help="Print all prompt templates and exit")
     args = parser.parse_args()
 
-    # Get the base and entity keys
-    config_file = "yatsee.toml"
-    config = toml.load(config_file)
-    base = config.get("base", "")
-    entity = config.get("entity", "")
+    # Determine input/output paths
+    entity_cfg = {}
+    if args.entity:
+        # Load entity config
+        try:
+            global_cfg = load_global_config(args.config)
+            entity_cfg = load_entity_config(global_cfg, args.entity)
+        except Exception as e:
+            print(f"❌ Config load failed: {e}", file=sys.stderr)
+            return 1
+    else:
+        # Require input if no entity is provided
+        if not args.txt_input:
+            print("❌ Without --entity, --txt-input must be defined", file=sys.stderr)
+            return 1
 
-    full_key = base + entity
+    # ----------------------------
+    # Load PROMPTS
+    # ----------------------------
+    prompt_types_path = ""
+    entity_prompt_file = os.path.join(entity_cfg.get("data_path"), "prompts", args.job_type, "prompts.toml")
+    default_prompt_file = os.path.join("prompts", args.job_type, "prompts.toml")
 
-    # Load and extract the sub-config dynamically
-    data_config = get_nested_config(config, full_key)
+    if os.path.isfile(entity_prompt_file):
+        prompt_types_path = entity_prompt_file
+    elif os.path.isfile(default_prompt_file):
+        prompt_types_path = default_prompt_file
 
-    # Generate permutations
-    known_speakers_permutations = build_name_permutations(data_config)
+    if prompt_types_path:
+        # Load prompts and prompt routing
+        _prompts = toml.load(prompt_types_path)
+        PROMPTS = {k: v["text"] for k, v in _prompts.get("prompts", {}).items()}
+        PROMPT_LOOKUP = _prompts.get("prompt_router", {})
+        CLASSIFIER_PROMPT = _prompts.get("classifier_prompt", {}).get("text", "")
+    else:
+        # fallback: inline general defaults
+        print(f"⚠️ No prompts found for job type '{args.job_type}', using inline general defaults", file=sys.stderr)
+        PROMPTS = {
+            "overview": "Default overview prompt text...",
+            "action_items": "Default action items prompt text..."
+        }
+        PROMPT_LOOKUP = {
+            "general": {"first": "overview", "multi": "overview", "final": "action_items"}
+        }
+        CLASSIFIER_PROMPT = ""
+
+    if args.disable_auto_classification:
+        validate_prompt(args.first_prompt, "first-prompt", PROMPTS)
+        validate_prompt(args.second_prompt, "second-prompt", PROMPTS)
+        validate_prompt(args.final_prompt, "final-prompt", PROMPTS)
 
     # Handle --print-prompts early and exit
     if args.print_prompts:
-        print("Available prompt templates:\n")
+        print(F"Available {args.job_type} prompt templates:\n")
         for key, prompt_text in PROMPTS.items():
             print(f"=== {key} ===\n{prompt_text}\n{'-'*40}\n")
         return 0
 
-    # Check for passed in arg.model
-    supported_models = ["mistral:latest", "mistral-nemo:latest", "llama3:latest", "gemma:2b", "qwen2.5:7b-instruct-q4_k_m"]
-    if not args.model:
-        print("❌ No model specified. Use --model(-m) to set one (e.g. mistral:instruct, llama3:latest).", file=sys.stderr)
+    # --- Flatten hotwords / build name permutations ---
+    known_speakers_permutations = build_name_permutations(entity_cfg)
+
+    # --- Resolve model ---
+    # Priority: CLI arg > entity config > global config
+    model = (
+        args.model
+        or entity_cfg.get("summarization_model")
+        or global_cfg.get("system", {}).get("default_summarization_model")
+    )
+
+    if not model:
+        print("❌ No model specified. Use --model(-m) or set it in entity/global config.", file=sys.stderr)
         return 1
 
-    if args.model.lower() not in supported_models:
-        print(f"❌ Unsupported model '{args.model}'. Supported models are: {', '.join(supported_models)}.", file=sys.stderr)
+    # supported_models = ["mistral:latest", "mistral-nemo:latest", "llama3:latest", "gemma:2b", "qwen2.5:7b-instruct-q4_k_m"]
+    # model_map is already loaded from config
+    model_map = global_cfg.get("models", {})
+
+    # Normalize lookup for user input (case-insensitive)
+    model_key = next((m for m in model_map if m.lower() == model.lower()), None)
+    if not model_key:
+        print(f"❌ Unsupported model '{model}'. Supported: {', '.join(model_map.keys())}.", file=sys.stderr)
         return 1
 
-    # Collect txt files from input path
-    if not args.txt_input:
-        print("❌ No input file or directory specified. Use --txt-input(-i) to set one.", file=sys.stderr)
-        return 1
+    # --- Resolve input path ---
+    input_dir = args.txt_input or os.path.join(entity_cfg.get("data_path"), "normalized")
+    file_list = discover_files(input_dir, ".txt", "punct.txt")
+    if not input_dir:
+        print("❌ No input file or directory specified. Use --txt-input(-i) or set it in the config.", file=sys.stderr)
+        return 0
 
-    try:
-        file_list = get_files_list(args.txt_input)
-        file_list = filter_transcript_file(file_list)
-    except (FileNotFoundError, ValueError) as e:
-        print(f"❌ {e}", file=sys.stderr)
-        return 1
+    # --- Resolve output path ---
+    model_cfg = model_map[model]
 
-    # Determine output directory, default to the ./summary directory
-    output_dir = args.output_dir
-    os.makedirs(output_dir, exist_ok=True)
+    output_dir = args.output_dir or os.path.join(entity_cfg["data_path"], model_cfg["append_dir"])
+    if not os.path.isdir(output_dir):
+        print(f"✓ Output directory will be created: {output_dir}", file=sys.stderr)
+        os.makedirs(output_dir, exist_ok=True)
+
+    # Now model_key matches the exact key in config
+    max_tokens = args.max_tokens or model_map[model_key].get("max_tokens", 3500)
+    num_ctx = model_map[model_key].get("num_ctx", 8192)
 
     # Open up a request object and setup the client connection
     # Create a global or shared session object once
@@ -946,6 +794,9 @@ def main():
     # Optionally configure session headers, retries, timeouts here
     llm_session.headers.update({"Content-Type": "application/json"})
 
+    # ----------------------------
+    # Process files for summerizer jobs
+    # ----------------------------
     for file_path in file_list:
         # Extract a friendly context string (e.g., meeting name and date) from the filename
         context = extract_context_from_filename(file_path, args.context)
@@ -954,7 +805,7 @@ def main():
         token_usage = 0
         output_token_usage = 0
 
-        print(f"🔍 Using model: {args.model}")
+        print(f"🔍 Using model: {model}")
         # Base name of the input file
         base_name = os.path.splitext(os.path.basename(file_path))[0]
 
@@ -966,8 +817,8 @@ def main():
             meeting_type = "general"
             if not args.disable_auto_classification:
                 # Try to auto classify the meeting type based off a small snippet of text
-                classifier_prompt = CLASSIFIER_PROMPT["classifier"].format(context=context, text=transcript[:2000])
-                meeting_type = classify_meeting(session=llm_session, model=args.model, prompt=classifier_prompt)
+                classifier_prompt = CLASSIFIER_PROMPT.format(context=context, text=transcript[:2000])
+                meeting_type = classify_meeting(session=llm_session, model=model, prompt=classifier_prompt)
 
                 # track token usage
                 token_usage += estimate_token_count(classifier_prompt)
@@ -986,9 +837,20 @@ def main():
                 # Select prompt type: first pass uses 'prompt_type_first', subsequent use 'prompt_type_second'
                 prompt_type = first_pass_id if pass_num == 1 else multi_pass_id
 
+                enable_chunk_writer = False
+                if enable_chunk_writer:
+                    # Prepare transcript for RAG if chunk writer enabled
+                    # This will use half the max tokens per chunk with about 16.7% overlap
+                    chunks = prepare_text_chunk(transcript, int(args.max_tokens / 2), int(args.max_tokens / 6))
+                    write_chunk_files(chunks, output_dir, meeting_type, base_name)
+
+                chunks_only = False
+                if chunks_only:
+                    break  # exit the while loop
+
                 # Prepare transcript for summarization by chunking contents if necessary
                 # If text too large to summarize in one call, break into chunks and summarize each chunk
-                chunks = prepare_text_chunk(transcript, max_tokens=args.max_tokens)
+                chunks = prepare_text_chunk(transcript, max_tokens=max_tokens)
                 chunk_summaries = []
 
                 count = 0
@@ -1012,7 +874,7 @@ def main():
                     prompt_template = PROMPTS.get(prompt_type, PROMPTS["detailed"])
                     chunk_prompt = prompt_template.format(context=context or "No context provided.", text=chunk)
 
-                    chunk_summary = summarize_transcript(llm_session,args.model, chunk_prompt)
+                    chunk_summary = summarize_transcript(llm_session, model, chunk_prompt, num_ctx)
                     chunk_summaries.append(chunk_summary)
 
                     # Update token usage counts
@@ -1024,17 +886,18 @@ def main():
                 summary = "\n\n".join(chunk_summaries)
 
                 # If summary is small enough or this is the last pass, finalize and exit loop
-                if estimate_token_count(summary) <= args.max_tokens or len(chunk_summaries) == 1 or pass_num == args.max_pass:
-                    print(f"Processing final summary with [{final_pass_id}]")
-                    prompt_template = PROMPTS.get(final_pass_id, PROMPTS["detailed"])
-                    final_prompt = prompt_template.format(context=context or "No context provided.", text=summary)
+                if pass_num >= 2:
+                    if estimate_token_count(summary) <= max_tokens or len(chunk_summaries) == 1 or pass_num == args.max_pass:
+                        print(f"Processing final summary with [{final_pass_id}]")
+                        prompt_template = PROMPTS.get(final_pass_id, PROMPTS["detailed"])
+                        final_prompt = prompt_template.format(context=context or "No context provided.", text=summary)
 
-                    transcript = summarize_transcript(llm_session, args.model, final_prompt)
+                        transcript = summarize_transcript(llm_session, model, final_prompt, num_ctx)
 
-                    # Update token usage counts
-                    token_usage += estimate_token_count(transcript)
-                    output_token_usage += estimate_token_count(transcript)
-                    break
+                        # Update token usage counts
+                        token_usage += estimate_token_count(transcript)
+                        output_token_usage += estimate_token_count(transcript)
+                        break
 
                 # Increment pass number and repeat loop
                 transcript = summary
@@ -1057,15 +920,29 @@ def main():
             print(f"  - tokIn: {token_usage} tokOut: {output_token_usage} - Total tokens: {total_tokens}")
             print(f"💰 Estimated GPT-4o API cost: ${estimated_cost:.4f}")
 
-            # Write the final summary to an output file
-            final_basename = f"{base_name}_final_summary"
-            success = write_summary_file(final_summary, final_basename, output_dir, args.output_format)
-            if success:
-                print("\n📝 Final Summary:\n")
-                print(final_summary)
-                print(f"\n✅ Final summary written to: {os.path.join(output_dir, final_basename)}.{'md' if args.output_format == 'markdown' else 'yaml'}")
-            else:
-                print("❌ Failed to write final summary file.")
+            # ----------------------------
+            # Write output files per job type
+            # ----------------------------
+            if args.job_type == "summary":
+                # Write the final summary to an output file
+                final_basename = f"{base_name}.summary"
+                success = write_summary_file(final_summary, final_basename, output_dir, args.output_format)
+                if success:
+                    print("\n📝 Final Summary:\n")
+                    print(final_summary)
+                    print(f"\n✅ Final summary written to: {os.path.join(output_dir, final_basename)}.{'md' if args.output_format == 'markdown' else 'yaml'}")
+                else:
+                    print("❌ Failed to write final summary file.")
+            # elif args.job_type == "research":
+            #     # Write the final facts gathered to json
+            #     final_basename = f"{base_name}.research"
+            #     # Instead of prose, we aggregate fact objects (JSONL)
+            #     final_facts = aggregate_facts_from_chunks(chunk_summaries)
+            #     success = write_facts_file(final_facts, final_basename, output_dir)  # writes JSONL or YAML
+            #     if success:
+            #         print(f"\n✅ Research facts written to: {os.path.join(output_dir, final_basename)}.jsonl")
+            #     else:
+            #         print("❌ Failed to write facts file.")
 
         except Exception as e:
             # Catch and report any errors reading file or processing
