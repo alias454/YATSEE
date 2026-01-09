@@ -194,7 +194,7 @@ All scripts are modular and can be run independently or as part of an automated 
 ---
 
 ## 📁 Filesystem Layout
-
+```
 data/
 └── <entity_handle>/
     ├── downloads/                ← Raw input (audio/video)
@@ -205,11 +205,12 @@ data/
     ├── yatsee_db/                ← Vector database files (ChromaDB)
     ├── prompts/                  ← Optional default prompt overrides(created by user)
     └── conf.toml                 ← Localized entity config
+```
 
 ---
 
 ## Config file routing/load order
-
+```
 Global TOML
     |
     +--> Entity handle
@@ -217,11 +218,12 @@ Global TOML
             +--> Local config (hotwords, divisions, data_path)
                     |
                     +--> Pipeline stage (downloads, audio, transcripts)
+```
 
 ---
 
 ## Prompt override layout example:
-
+```
 ./prompts/                      # default prompts for all entities
   └── research/
       └── prompts.toml          # default prompts & routing for 'research' job type
@@ -243,6 +245,7 @@ Global TOML
   - Loader first checks `data/<entity>/prompts/<job_type>/prompts.toml`.  
   - If found → full override of defaults.  
   - If not found → fall back to `prompts/<job_type>/prompts.toml`.
+```
 
 ---
 
