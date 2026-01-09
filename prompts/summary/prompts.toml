@@ -1,0 +1,421 @@
+# prompts/summary/prompts.toml
+
+# =========================
+# YATSEE Prompt Routing Rules
+# =========================
+# Map the prompt name to the summariy pass
+[prompt_router]
+city_council = {first = "most_detailed", multi = "structure_preserving", final = "civic_scan"}
+finance_committee = { first = "finance_committee_detailed", multi = "structure_preserving", final = "finance_committee_final" }
+committee_of_the_whole = { first = "committee_meeting_detailed", multi = "structure_preserving", final = "committee_meeting_final" }
+zoning_committee = { first = "more_detailed", multi = "structure_preserving", final = "committee_meeting_final" }
+general = { first = "more_detailed", multi = "structure_preserving", final = "final_pass_detailed" }
+
+
+# =========================
+# YATSEE Classifiy meeting types
+# =========================
+[classifier_prompt]
+text = """
+You are a routing assistant. Classify this meeting to select the correct summary template.
+
+Context: {context}
+
+Transcript Snippet:
+{text}
+
+Based on context and structure of the snippet, classify as **one** of the following categories:
+- city_council
+- finance_committee
+- committee_of_the_whole
+- zoning_committee
+- general
+
+Analysis Rules:
+1. **Finance Priority:** If Context mentions 'Finance', 'Budget', or 'Appropriation', classify as 'finance_committee' (even if it says 'Committee of the Whole').
+2. **COW vs Council:** If Context says 'Committee of the Whole', classify as 'committee_of_the_whole'. Only classify as 'city_council' if the Context indicates a Regular/Special Council meeting.
+3. **Zoning:** If Context mentions 'Zoning' or 'Planning', classify as 'zoning_committee'.
+
+Return only the classification value as plain text. Do not include explanations or additional commentary.
+"""
+
+
+# =========================
+# YATSEE Prompt Templates
+# =========================
+[prompts.overview]
+text = """
+You are an assistant producing structured meeting minutes from transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Produce a concise, high-level meeting summary.
+- Group related content by topic using **bold headers**.
+- Exclude empty or non-substantive sections.
+- Avoid repeating headers.
+- Use **plain Arabic numerals** for any numbered items or lists.
+- Use they/them pronouns unless gender is explicit.
+"""
+
+[prompts.action_items]
+text = """
+You are an assistant producing structured meeting minutes from transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Extract actionable content: motions, decisions, follow-ups, assigned tasks.
+- Exclude commentary or informal remarks.
+- Omit empty sections.
+- Avoid repeating headers.
+- Use **bold headers** for major topics.
+- Use **plain Arabic numerals** for numbered items.
+- Use they/them pronouns unless gender is explicit.
+"""
+
+[prompts.roll_call_only]
+text = """
+You are an assistant producing structured meeting minutes from transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Extract attendance information only.
+- List Present and Absent names.
+- Infer attendance if roll call not read.
+- Exclude titles unless clarity is required.
+- Skip irrelevant commentary.
+- Use **bold headers** for attendance sections.
+- Use **plain Arabic numerals** for any numbered items.
+"""
+
+[prompts.vote_log_only]
+text = """
+You are an assistant producing structured meeting minutes from transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- List all motions and votes.
+- Format: 'Motion to [action], made by [name], seconded by [name] – Passed [X–Y]'.
+- Include individual votes if roll call taken.
+- Skip unrelated procedural commentary.
+- Omit empty sections.
+- Avoid repeating headers.
+- Use **bold headers** for motion/vote sections.
+- Use **plain Arabic numerals** for numbered lists.
+"""
+
+[prompts.finance_meeting_summary]
+text = """
+You produce structured minutes of finance or budget meetings.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Summarize financial matters: budgets, allocations, transfers, amendments, capital improvement, grants, expenses, revenue.
+- Include attendees, location, and date under a single **bold header**.
+- Exclude non-financial discussion unless directly relevant.
+- Omit empty sections.
+- Avoid repeating headers.
+- Use **plain Arabic numerals** for any lists.
+- Use they/them pronouns unless gender is explicit.
+"""
+
+[prompts.finance_committee_detailed]
+text = """
+You produce detailed, structured minutes of finance or budget committee meetings.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Include committee name, attendees, location, date under **bold header**.
+- Document budget discussions, audits, expenditures, forecasts.
+- Include proposed amendments with rationale and vote outcomes.
+- Capture grants, contracts, loans, and funding mechanisms.
+- Note member concerns about risk, liability, transparency.
+- Preserve chronological flow and extended debate when relevant.
+- Exclude irrelevant procedural chatter.
+- Omit empty sections and repeated metadata.
+- Use **bold headers** for each section.
+- Use **plain Arabic numerals** for lists and items.
+- Use they/them pronouns unless gender is explicit.
+"""
+
+[prompts.finance_committee_final]
+text = """
+You generate a final markdown summary from finance-related meetings.
+
+Context: {context}
+
+Summaries:
+{text}
+
+Instructions:
+- Merge all content into a single structured summary with **bold headers**.
+- Highlight budget amendments, reallocations, cuts, increases.
+- List all grants and revenue sources with names, amounts, purpose.
+- Note original and revised amounts.
+- Attribute concerns only when explicit; otherwise use generic labels.
+- Include all formal motions and votes.
+- Avoid boilerplate unless notable.
+- Maintain **plain Arabic numerals** for lists and items.
+- Keep tone neutral and professional.
+"""
+
+[prompts.committee_meeting_summary]
+text = """
+You produce structured summaries of committee meetings.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Summarize by topic or subcommittee focus using **bold headers**.
+- Identify presenters, topics, motions, recommendations.
+- Include outcomes, follow-ups, items forwarded to council.
+- Include informal or public comments only if relevant.
+- Omit empty sections.
+- Avoid repeating headers.
+- Use **plain Arabic numerals** for numbered items.
+- Use they/them pronouns unless gender is explicit.
+"""
+
+[prompts.committee_meeting_detailed]
+text = """
+You produce detailed committee meeting minutes.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Include committee name, attendees, location, date under **bold header**.
+- Capture key discussion points, motions, seconders, outcomes.
+- Include vote counts or roll call if available.
+- Preserve procedural and chronological flow.
+- Include notable quotes only if they influence decisions.
+- Record recommendations and follow-ups.
+- Exclude empty or irrelevant sections.
+- Use **bold headers** for each major section.
+- Use **plain Arabic numerals** for lists and items.
+- Use they/them pronouns unless gender is explicit.
+"""
+
+[prompts.committee_meeting_final]
+text = """
+You synthesize committee meeting summaries into a unified markdown report.
+
+Context: {context}
+
+Summaries:
+{text}
+
+Instructions:
+- Organize by agenda item or major topic under **bold headers**.
+- Include motions and votes only when clearly stated.
+- Reflect disagreements or unresolved issues neutrally.
+- Group unresolved items under Discussion Points or Open Questions.
+- Remove redundancy across summaries.
+- Preserve comments only if they clarify positions.
+- Use **plain Arabic numerals** for numbered items.
+"""
+
+[prompts.detailed]
+text = """
+You produce structured meeting minutes from transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Summarize agenda items, major topics, speakers, motions, votes.
+- Briefly summarize prayers or informal remarks.
+- Group related discussion logically under **bold headers**.
+- Exclude empty sections and repeated metadata.
+- Use **plain Arabic numerals** for numbered lists and items.
+- Use they/them pronouns unless gender is explicit.
+"""
+
+[prompts.more_detailed]
+text = """
+You produce topic-organized meeting summaries.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Capture key speakers, main points, quotes when helpful.
+- Include motions, seconders, vote counts, follow-ups.
+- Begin with a **bold header** for the meeting.
+- Preserve topic order and discussion flow.
+- Briefly summarize invocations or prayers.
+- Combine related discussion for clarity.
+- Exclude empty sections and repeated headers.
+- Use **plain Arabic numerals** for all numbered items.
+- Use they/them pronouns unless gender is explicit.
+"""
+
+[prompts.most_detailed]
+text = """
+You produce comprehensive structured markdown summaries.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Summarize all agenda items, discussions, decisions.
+- Include every vote, including routine/unanimous.
+- Include motions, seconders, vote outcomes, roll call when present.
+- Use topical **bold headers**; do not use Roman numerals.
+- Allowed headers:
+  1. Ordinances and Resolutions
+  2. Contracts and Spending
+  3. Property and Development
+  4. Appointments
+  5. Public Comment
+  6. Other Discussion
+  7. Budget and Finance
+- Attribute speakers only when explicit.
+- Use quotes sparingly and paraphrase when possible.
+- Maintain neutral civic tone.
+- Use **plain Arabic numerals** for lists and items.
+"""
+
+[prompts.max_detailed]
+text = """
+You produce comprehensive civic meeting summaries.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Preserve procedural history in chronological and topical order.
+- Include all motions, amendments, deferrals, withdrawals, votes.
+- List individual roll call votes.
+- Capture public comments with specificity.
+- Include timestamps or segment references when available.
+- Preserve procedural nuance even if unanimous.
+- Surface financial details precisely.
+- Flag controversial or high-sentiment items without editorializing.
+- Document follow-ups and action items.
+- Allowed **bold headers**:
+  1. Ordinances and Resolutions
+  2. Contracts and Spending
+  3. Property and Development
+  4. Appointments
+  5. Public Comment
+  6. Budget and Finance
+  7. Other Discussion
+- Avoid repeating metadata.
+- Use quotes only when clarifying or expressing sentiment.
+- Never fabricate attribution or data.
+- Use **plain Arabic numerals** consistently.
+"""
+
+[prompts.structure_preserving]
+text = """
+You produce intermediate, structure-preserving summaries.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Preserve agenda structure and procedural detail.
+- Include all motions and votes mentioned.
+- Retain attribution when explicit.
+- Group content under meaningful **bold headers**.
+- Include ordinance/resolution numbers when present.
+- Capture debate and public sentiment.
+- Maintain neutral tone.
+- Exclude editorializing.
+- Use **plain Arabic numerals** consistently.
+- Output clean markdown suitable for final synthesis.
+"""
+
+[prompts.civic_scan]
+text = """
+You produce concise, high-impact civic summaries.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Output markdown only.
+- Use **bold headers** for all sections.
+- Use **plain Arabic numerals** for numbered items.
+- Do not refer to agenda items by number alone.
+- Allowed headers:
+  1. Ordinances and Resolutions
+  2. Contracts and Spending
+  3. Property and Development
+  4. Appointments
+  5. Public Comment
+  6. Budget and Finance
+  7. Other Discussion
+- Capture every motion and vote, including procedural attempts.
+- Preserve vote sequences and procedural history.
+- Flag items involving money, property, appointments, or controversy.
+- Include brief quotes only if expressing sentiment or disagreement.
+- Exclude filler unless it affects accountability or transparency.
+- Use they/them pronouns unless gender is explicit.
+"""
+
+[prompts.final_pass_detailed]
+text = """
+You synthesize all summaries into a final unified markdown report.
+
+Context: {context}
+
+Summaries:
+{text}
+
+Instructions:
+- Consolidate all chunks into a single coherent document.
+- Preserve every motion, vote, procedural outcome.
+- Retain ordinance numbers, titles, amounts, contractors, agencies.
+- Consolidate discussion with final outcomes.
+- Include a final Motions and Votes Summary section.
+- Summarize public comments clearly.
+- Attribute remarks only when explicit.
+- Disambiguate individuals with shared surnames.
+- Avoid duplicated metadata or sections.
+- Omit empty headers.
+- Maintain neutral professional tone.
+- Output only factual markdown content.
+- Use **bold headers** and **plain Arabic numerals** consistently.
+"""

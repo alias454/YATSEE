@@ -39,6 +39,10 @@ summary*
 !README.md
 !requirements.txt
 
+# Allow default prompt files
+!prompts/summary/prompts.toml
+!prompts/research/prompts.toml
+
 # Experimental
 embed*
 interface*

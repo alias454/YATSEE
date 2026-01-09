@@ -203,6 +203,7 @@ data/
     ├── normalized/               ← Cleaned + structured output (spaCy)
     ├── summary/                  ← Generated meeting summaries (.md/.yaml)
     ├── yatsee_db/                ← Vector database files (ChromaDB)
+    ├── prompts/                  ← Optional default prompt overrides(created by user)
     └── conf.toml                 ← Localized entity config
 
 ---
@@ -216,6 +217,32 @@ Global TOML
             +--> Local config (hotwords, divisions, data_path)
                     |
                     +--> Pipeline stage (downloads, audio, transcripts)
+
+---
+
+## Prompt override layout example:
+
+./prompts/                      # default prompts for all entities
+  └── research/
+      └── prompts.toml          # default prompts & routing for 'research' job type
+
+./data/
+  └── defined_entity/           # entity-specific data
+      └── prompts/
+          └── research/
+              └── prompts.toml  # full override for defined_entity 'research' job type
+
+./data/
+  └── generic_entity/           # another entity with no override
+      └── prompts/
+          └── research/
+              # no file, falls back to default in prompts/research/prompts.toml
+
+**Behavior**:
+
+  - Loader first checks `data/<entity>/prompts/<job_type>/prompts.toml`.  
+  - If found → full override of defaults.  
+  - If not found → fall back to `prompts/<job_type>/prompts.toml`.
 
 ---
 
