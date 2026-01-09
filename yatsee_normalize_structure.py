@@ -1,416 +1,501 @@
 #!/usr/bin/env python3
 """
-Splits transcript text files into individual sentences using spaCy and lightly cleans the text.
+yatsee_normalize_structure.py
 
-This script is designed for post-transcription cleanup and segmentation:
-- It assumes that raw transcripts have already been cleaned of timestamps and speaker labels.
-- It performs light text normalization to fix spacing and punctuation issues.
-- It uses spaCy to segment text into natural sentences for further processing.
+Layer 3 Normalize: Clean, normalize, and split polished transcripts into
+sentence-per-line files for downstream summarization, embedding, or indexing.
 
-Requirements:
-- Python 3.8+
-- spaCy
-- Download the spaCy model with:
-    python -m spacy download en_core_web_sm
+Input/Output:
+  - Input: .punct.txt files from 'normalized/' under entity_handle (Layer 2 Transform)
+  - Output: Cleaned .txt files in 'normalized/' under same entity_handle (Layer 3 Normalize)
 
-Usage:
-  ./yatsee_normalize_structure.py --txt-input input.txt --output-dir output_dir/
-  ./yatsee_normalize_structure.py --txt-input transcripts/ --output-dir split_transcripts/ [--force] [--no-spacy] [--deep-clean] [--preserve-paragraphs]
+Dependencies:
+  - spaCy for sentence segmentation
+  - toml for global + entity config parsing
+  - re, argparse, os, sys for file and text handling
 
-Arguments:
-  --txt-input, -i      Input .txt file or directory of .txt files (required).
-  --output-dir, -o     Output directory where processed files will be saved (default: ./normalized).
-  --no-spacy           Disable spaCy sentence segmentation; fallback to splitting at line breaks.
-  --force              Overwrite existing output files if they exist.
-  --deep-clean         Apply deeper cleanup such as filler word removal, repeated character trimming, etc.
-  --preserve-paragraphs Keep paragraphs separated by blank lines, splitting sentences inside paragraphs.
+Usage Examples:
+  ./yatsee_normalize_structure.py -e entity_handle
+  ./yatsee_normalize_structure.py -i ./normalized -o ./normalized --deep-clean
 
-Notes:
-- When input is a directory, all .txt files will be processed.
-- Output files will be saved in the specified output directory with the same filenames as inputs.
-- SpaCy model 'en_core_web_sm' is required unless --no_spacy is specified.
-- Output files contain one sentence per line, after basic or deep normalization.
-- When --preserve_paragraphs is used, paragraphs are separated by a blank line in output.
-
-Examples:
-  ./yatsee_normalize_structure.py -i transcript.txt -o split_sentences/
-  ./yatsee_normalize_structure.py -i transcripts_folder/ -o split_sentences/ --force
-  ./yatsee_normalize_structure.py -i transcripts/ -o split/ --no_spacy --deep-clean --preserve-paragraphs
+Design Notes:
+  - Loads and merges global yatsee.toml with optional entity-specific config
+  - Preserves paragraph breaks, applies entity-specific replacements, and limits
+    inline and consecutive line repetitions
+  - Supports optional spaCy sentence splitting, deep cleaning, and force-overwrite
+  - Modular: separates config loading, text normalization, sentence splitting,
+    repetition handling, and replacements
+  - Outputs files ready for Layer 4 summarization or downstream NLP pipelines
 """
 
 import os
 import sys
 import argparse
-import spacy
 import re
-from collections import defaultdict
-from typing import Optional, List
+from typing import List, Dict, Any, Optional
+import toml
+import spacy
 
 
-def filter_file(path_list: list[str], ext: str = ".txt") -> list[str]:
+def load_global_config(path: str) -> Dict[str, Any]:
     """
-    Filters only txt files and returns them as a list
+    Load the global YATSEE configuration file.
 
-    :param path_list: Base name of the meeting file (no extension)
-    :param ext: File extension to filter on
-    :return: List of resolved file paths
+    :param path: Path to the global TOML config file
+    :return: Parsed global configuration as a dictionary
+    :raises FileNotFoundError: If the file does not exist
+    :raises ValueError: If the TOML cannot be parsed
     """
-    files = []
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Global configuration file not found: {path}")
+    try:
+        return toml.load(path)
+    except Exception as exc:
+        raise ValueError(f"Failed to parse global config '{path}': {exc}") from exc
 
-    for path in path_list:
-        if path.lower().endswith(ext):
-            files.append(path)
 
-    return files
-
-
-def get_files_list(path: str) -> list[str]:
+def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any]:
     """
-    Collect a list of .txt and .out files from a directory or single file path.
+    Load and merge entity-specific configuration with global defaults.
 
-    :param path: Path to .txt or .out files, or directory
-    :return: List of valid txt file paths
-    :raises FileNotFoundError: If no valid files found
-    :raises ValueError: If unsupported file extension encountered
+    :param global_cfg: Global configuration dictionary
+    :param entity: Entity handle to load (e.g., 'us_ca_fresno_city_council')
+    :return: Merged entity configuration dictionary
+    :raises KeyError: If entity is not defined in global config
+    :raises FileNotFoundError: If local entity config is missing
     """
-    valid_extensions = (".txt", ".out")
-    txt_files = []
+    reserved_keys = {"settings", "meta"}
 
-    if os.path.isdir(path):
-        for filename in os.listdir(path):
-            full_path = os.path.join(path, filename)
-            if os.path.isfile(full_path) and filename.lower().endswith(valid_extensions):
-                txt_files.append(full_path)
-        if not txt_files:
-            raise FileNotFoundError(f"No valid .txt files found in directory: {path}")
-    elif os.path.isfile(path):
-        if path.lower().endswith(valid_extensions):
-            txt_files.append(path)
+    entities_cfg = global_cfg.get("entities", {})
+    if entity not in entities_cfg:
+        raise KeyError(f"Entity '{entity}' not defined in global config")
+
+    system_cfg = global_cfg.get("system", {})
+    root_data_dir = os.path.abspath(system_cfg.get("root_data_dir", "./data"))
+    local_path = os.path.join(root_data_dir, entity, "config.toml")
+    if not os.path.exists(local_path):
+        raise FileNotFoundError(f"Local config for entity '{entity}' not found at: {local_path}")
+
+    local_cfg = toml.load(local_path)
+
+    merged = {
+        "entity": entity,
+        "root_data_dir": root_data_dir,
+        **system_cfg,
+        **entities_cfg.get(entity, {}),
+    }
+
+    for key, value in local_cfg.items():
+        if key in reserved_keys:
+            merged.update(value)
         else:
-            raise ValueError(f"Unsupported file extension: {os.path.splitext(path)[1]}")
+            merged[key] = value
+    return merged
+
+
+def discover_files(input_path: str, supported_exts, exclude_suffix: str = None) -> List[str]:
+    """
+    Collect files from a directory or single file based on allowed extensions,
+    optionally excluding files with a specific suffix.
+
+    :param input_path: Path to directory or file
+    :param supported_exts: Supported file extensions (str or tuple)
+    :param exclude_suffix: Optional suffix to exclude (e.g., '.punct.txt')
+    :return: Sorted list of valid file paths
+    :raises FileNotFoundError: If path does not exist
+    :raises ValueError: If file extension is unsupported
+    """
+    files: List[str] = []
+
+    if os.path.isdir(input_path):
+        for f in os.listdir(input_path):
+            full = os.path.join(input_path, f)
+            if (
+                os.path.isfile(full)
+                and f.lower().endswith(supported_exts)
+                and (exclude_suffix is None or not f.lower().endswith(exclude_suffix))
+            ):
+                files.append(full)
+    elif os.path.isfile(input_path):
+        if input_path.lower().endswith(supported_exts) and (
+            exclude_suffix is None or not input_path.lower().endswith(exclude_suffix)
+        ):
+            files.append(input_path)
+        else:
+            raise ValueError(f"Unsupported file extension or excluded: {os.path.basename(input_path)}")
     else:
-        raise FileNotFoundError(f"Input path not found: {path}")
+        raise FileNotFoundError(f"Path not found: {input_path}")
 
-    return txt_files
+    return sorted(files)
 
 
-def load_spacy_model() -> spacy.language.Language:
+def load_spacy_model(model_name: str) -> spacy.language.Language:
     """
-    Load the spaCy English language model.
+    Load a spaCy model for sentence segmentation.
 
-    :return: spaCy language model instance.
+    :param model_name: Name of the spaCy model (e.g., 'en_core_web_sm').
+    :return: Loaded spaCy Language object.
+    :raises OSError: If the spaCy model is not installed.
     """
-    # return spacy.load("en_core_web_sm")
-    return spacy.load("en_core_web_md")
+    return spacy.load(model_name)
 
 
-# Collapse repeated phrases inside a line
 def collapse_inline(line: str, inline_max: int = 5) -> str:
     """
-    Limits repeated phrases inside a line and repeated full lines separately.
+    Collapse repeated inline phrases within a single line.
 
-    :param inline_max: Max inline phrase repetitions (default 5)
-    :return: Text with repetitions collapsed
+    - Prevents excessive repetition from transcript artifacts.
+    - Uses regex to identify repeated phrases up to 5 words.
+
+    :param line: Input text line.
+    :param inline_max: Maximum allowed repetitions.
+    :return: Line with repetitions collapsed.
     """
-    pattern = re.compile(
-        r'\b((?:\w+\s+){0,4}\w+)(?:\s+\1){' + str(inline_max) + r',}',
-        flags=re.IGNORECASE
-    )
-    def replacer(match):
-        phrase = match.group(1)
-        return (' ' + phrase) * inline_max
-    return pattern.sub(replacer, line)
+    pattern = re.compile(r'\b((?:\w+\s+){0,4}\w+)(?:\s+\1){' + str(inline_max) + r',}', flags=re.IGNORECASE)
+    return pattern.sub(lambda m: (' ' + m.group(1)) * inline_max, line)
 
 
-def limit_repetitions(text: str, inline_max: int = 5, line_max: int = 1) -> str:
+def limit_repetitions(text: str, inline_max: int = 2, line_max: int = 1) -> str:
     """
-    Limits CONSECUTIVE repeated phrases and full lines.
-    If a line appears at the start and end of a doc, both are kept.
-    If a line appears 5 times in a row, only the first `line_max` are kept.
+    Collapse repeated lines and inline phrases across the text.
 
-    :param text: Multi-line transcript text
-    :param inline_max: Max inline phrase repetitions (e.g., "thank you thank you")
-    :param line_max: Max CONSECUTIVE full-line repetitions
-    :return: Text with repetitions collapsed
+    - Reduces transcript noise by limiting inline and consecutive line repetition.
+    - Case-insensitive and ignores non-alphanumeric differences when comparing lines.
+
+    :param text: Multi-line input text.
+    :param inline_max: Max inline phrase repetitions.
+    :param line_max: Max consecutive identical lines.
+    :return: Cleaned text.
     """
     result_lines = []
-
-    # Store the normalized version of the previous line for robust comparison
     prev_line_key = None
     consecutive_count = 0
 
     for line in text.splitlines():
-        # First, collapse inline repetitions within the current line
-        processed_line = collapse_inline(line.strip(), inline_max)
+        processed = collapse_inline(line.strip(), inline_max)
+        current_key = re.sub(r'[^a-z0-9]', '', processed.lower())
 
-        # Create a normalized key for comparison (lowercase, no punctuation/spaces)
-        # This ensures "Thank you." and "  thank you" are treated as identical.
-        current_line_key = re.sub(r'[^a-z0-9]', '', processed_line.lower())
-
-        if not current_line_key:
-            # It's a blank line, reset our tracking and preserve it
+        if not current_key:
+            # Preserve paragraph breaks as empty lines
             result_lines.append('')
             prev_line_key = None
             consecutive_count = 0
             continue
 
-        # Check if this line is a consecutive repeat of the previous one
-        if current_line_key == prev_line_key:
+        if current_key == prev_line_key:
             consecutive_count += 1
         else:
-            # The line is different, reset the counter
             consecutive_count = 1
 
-        # Only add the line if its consecutive count is within the limit
         if consecutive_count <= line_max:
-            result_lines.append(processed_line)
+            result_lines.append(processed)
 
-        # Update the previous line key for the next iteration
-        prev_line_key = current_line_key
+        prev_line_key = current_key
 
     return '\n'.join(result_lines)
 
 
-def capitalize_sentences(text: str) -> str:
+def capitalize_sentences(text: str, preserve_entities: Optional[List[str]] = None) -> str:
     """
-    Capitalizes the first letter of each sentence in the input text.
+    Capitalize the first alphabetical character of each sentence while
+    preserving acronyms, entity names, and proper nouns.
 
-    Sentences are detected by splitting on sentence-ending punctuation
-    followed by whitespace (including newlines).
-
-    :param text: Raw input text possibly containing multiple sentences.
-    :return: Text with each sentence's first character capitalized,
-             preserving the rest of the sentence as-is.
+    :param text: Sentence-separated text
+    :param preserve_entities: List of words/phrases not to modify
+    :return: Capitalized text
     """
-    # Split on sentence-ending punctuation followed by whitespace
+    preserve_entities = preserve_entities or []
+    # Split by sentence-ending punctuation
     sentences = re.split(r'(?<=[.!?])\s+', text)
     capitalized = []
 
-    for s in sentences:
-        s = s.strip()
-        if s:
-            # Capitalize first character, keep the rest unchanged
-            s = s[0].upper() + s[1:]
-            capitalized.append(s)
+    for sentence in sentences:
+        stripped = sentence.lstrip()
+        if not stripped:
+            continue
 
-    # Join sentences back with a space separating them
+        # Skip if sentence starts with a preserved entity
+        if any(stripped.lower().startswith(ent.lower()) for ent in preserve_entities):
+            capitalized.append(sentence)
+            continue
+
+        match = re.search(r'[A-Za-z]', stripped)
+        if match:
+            idx = sentence.index(match.group(0))
+            fixed = sentence[:idx] + sentence[idx].upper() + sentence[idx + 1:]
+            capitalized.append(fixed)
+        else:
+            capitalized.append(sentence)
+
     return ' '.join(capitalized)
 
 
-def normalize_text(text: str, deep: bool = False) -> str:
+def normalize_text(text: str, deep: bool = False, preserve_entities: Optional[List[str]] = None) -> str:
     """
-    Cleanup of transcript text using regular expressions.
+    Robust transcript normalization.
 
-    Light cleaning (always applied):
-    - Removes carriage returns
-    - Collapses whitespace
-    - Normalizes punctuation and spacing
-    - Collapses obvious stutters and repetitions
-    - Capitalizes standalone 'i'
-    - Fixes number and currency spacing
-    - Normalizes acronyms and ellipses
+    Features:
+    - Collapses character stutters (sooooo -> soo)
+    - Collapses short word/phrase repetitions
+    - Removes filler words (optional)
+    - Preserves numbers, acronyms, and entity names
+    - Removes bracketed content (optional deep clean)
+    - Fixes spacing, punctuation, and capitalization for 'I'
+    - Preserves paragraph breaks
 
-    Deep cleaning (optional):
-    - Removes filler words
-    - Removes [[bracketed content]]
-    - Trims excessive repeated characters
+    :param text: Raw transcript text
+    :param deep: Enable deep cleaning (filler words, brackets)
+    :param preserve_entities: List of words/phrases to protect from changes
+    :return: Normalized text
     """
+    preserve_entities = preserve_entities or []
+    placeholders = {f"__ENTITY{i}__": re.escape(name) for i, name in enumerate(preserve_entities)}
 
-    # --- 1. Normalize whitespace early ---
+    # --- Protect entity names temporarily ---
+    for ph, name in placeholders.items():
+        text = re.sub(r'\b' + name + r'\b', ph, text, flags=re.IGNORECASE)
+
+    # --- Normalize whitespace ---
     text = re.sub(r'[\s\r\n\u00A0]+', ' ', text)
 
-    # --- 2. Collapse character stutters (sooooo -> soo) ---
+    # --- Collapse character stutters (sooooo -> soo) ---
     text = re.sub(r'(.)\1{3,}', r'\1\1', text)
 
-    # --- 3. Collapse word-level stutters (F F F F -> F) ---
-    # Only collapses short tokens to avoid nuking legitimate repetition
-    text = re.sub(
-        r'\b([A-Za-z])(?:[\s,]+\1){2,}\b',
-        r'\1',
-        text
-    )
+    # --- Collapse short word-level stutters (F F F -> F) ---
+    text = re.sub(r'\b([A-Za-z])(?:[\s,]+\1){2,}\b', r'\1', text)
 
-    # --- 4. Collapse short phrase repetition (thank you thank you thank you) ---
-    text = re.sub(
-        r'\b((?:\w+\s+){0,3}\w+)(?:\s+\1){2,}',
-        r'\1',
-        text,
-        flags=re.IGNORECASE
-    )
+    # --- Collapse repeated short phrases (thank you thank you thank you -> thank you) ---
+    text = re.sub(r'\b((?:\w+\s+){0,3}\w+)(?:\s+\1){2,}', r'\1', text, flags=re.IGNORECASE)
 
-    # --- 5. Punctuation normalization ---
+    # --- Punctuation normalization ---
     text = re.sub(r',{2,}', ',', text)
     text = re.sub(r'([?!])\1+', r'\1', text)
-
-    # Normalize ellipses safely
     text = re.sub(r'\s*\.\s*\.\s*\.', ' ... ', text)
     text = re.sub(r'\.{2,}', '.', text)
-
-    # --- 6. Spacing around punctuation ---
     text = re.sub(r'\s+([.,!?;:])', r'\1', text)
     text = re.sub(r'([.,!?;:])(?=\S)', r'\1 ', text)
 
-    # --- 7. Content-specific fixes ---
+    # --- Content-specific fixes ---
     text = re.sub(r'\bi\b', 'I', text)
     text = re.sub(r'\$\s+(\d)', r'$\1', text)
     text = re.sub(r'(\d)\s+%', r'\1%', text)
-
-    # Normalize common acronym spacing
     text = re.sub(r'\b(u)\.\s*(s)\.\b', 'U.S.', text, flags=re.IGNORECASE)
+    text = re.sub(r'(\d{1,3})(?:\s*,\s*|\s+)(\d{3})', r'\1,\2', text)
+    text = re.sub(r'(\d+)\s*\.\s*(\d+)', r'\1.\2', text)
 
-    # --- 8. Deep cleaning (optional) ---
+    # --- Deep cleaning ---
     if deep:
         filler_words = r'\b(um|uh|erm|you know|like|so|well|ah|oh|mm|hmm|okay)\b'
         text = re.sub(filler_words, '', text, flags=re.IGNORECASE)
-
         text = re.sub(r'\[\[.*?\]\]', '', text)
         text = re.sub(r'\s{2,}', ' ', text)
+
+    # --- Restore entity placeholders ---
+    for ph, name in placeholders.items():
+        text = text.replace(ph, name)
+
+    return text.strip()
+
+
+def normalize_text_minimal(text: str) -> str:
+    # Normalize whitespace
+    text = re.sub(r'[\s\r\n\u00A0]+', ' ', text)
+
+    # Collapse repeated characters
+    text = re.sub(r'(.)\1{3,}', r'\1\1', text)
+
+    # Fix numbers and currency
+    text = re.sub(r'\$\s+(\d)', r'$\1', text)
+    text = re.sub(r'(\d{1,3})(?:\s*,\s*|\s+)(\d{3})', r'\1,\2', text)
+    text = re.sub(r'(\d+)\s*\.\s*(\d+)', r'\1.\2', text)
+
+    # Capitalize first letters
+    text = capitalize_sentences(text)
 
     return text.strip()
 
 
 def split_sentences(text: str, model: spacy.language.Language) -> List[str]:
     """
-    Segment text into natural sentences using spaCy.
+    Split text into sentences using a spaCy model.
 
-    :param text: Normalized input text
-    :param model: Loaded spaCy model
-    :return: List of individual sentence strings
+    :param text: Input text.
+    :param model: Loaded spaCy model for sentence segmentation.
+    :return: List of sentence strings.
     """
     doc = model(text)
     return [sent.text.strip() for sent in doc.sents if sent.text.strip()]
 
 
-def process_text_to_sentences(text: str, model: Optional[spacy.language.Language], use_spacy: bool = True, preserve_paragraphs: bool = False) -> str:
+def process_text_to_sentences(
+        text: str,
+        model: Optional[spacy.language.Language] = None,
+        use_spacy: bool = True,
+        preserve_paragraphs: bool = False,
+        trim_whitespace: bool = True
+) -> str:
     """
-    Process and segment transcript text into cleaned sentence lines.
+    Convert text into one sentence per line with optional paragraph preservation.
 
-    :param text: Raw input text
-    :param model: spaCy language model
-    :param use_spacy: Whether to use spaCy sentence splitting
-    :param preserve_paragraphs: Keep blank lines between paragraph blocks
-    :return: Processed text with one sentence per line (paragraphs separated if applicable)
+    Features:
+    - Uses spaCy for sentence segmentation if available.
+    - Preserves paragraph breaks with blank lines if requested.
+    - Optionally trims excessive leading/trailing whitespace per line.
+    - Falls back to simple newline splitting if spaCy is disabled or unavailable.
+
+    :param text: Input text.
+    :param model: Optional spaCy Language model for sentence splitting.
+    :param use_spacy: Enable spaCy-based splitting.
+    :param preserve_paragraphs: Keep paragraph separation with blank lines.
+    :param trim_whitespace: Strip leading/trailing whitespace from each sentence.
+    :return: Text string with one sentence per line.
     """
+    text = text.strip()
+
     if use_spacy and model:
         if preserve_paragraphs:
-            paragraphs = re.split(r'\n\s*\n', text.strip())
+            paragraphs = re.split(r'\n\s*\n', text)
             processed_paragraphs = []
-            for para in paragraphs:
-                sentences = split_sentences(para, model)
+            for p in paragraphs:
+                sentences = [s.strip() for s in split_sentences(p, model) if s.strip()]
+                if trim_whitespace:
+                    sentences = [s.strip() for s in sentences]
                 processed_paragraphs.append("\n".join(sentences))
-            return "\n\n".join(processed_paragraphs).strip() + "\n"
+            return "\n\n".join(processed_paragraphs) + "\n"
         else:
-            sentences = split_sentences(text, model)
-            return "\n".join(sentences).strip() + "\n"
+            sentences = [s.strip() for s in split_sentences(text, model) if s.strip()]
+            return "\n".join(sentences) + "\n"
     else:
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        return "\n".join(lines).strip() + "\n"
+        # Fallback: split on existing line breaks
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        return "\n".join(lines) + "\n"
+
+
+def apply_replacements(text: str, replacements: Dict[str, str]) -> str:
+    """
+    Apply flattened entity-specific replacements to transcript text.
+
+    - Matches whole words case-insensitively.
+    - Sorted by longest key first to avoid partial matches overwriting longer phrases.
+
+    :param text: Input text.
+    :param replacements: Dictionary mapping bad -> correct strings.
+    :return: Text with replacements applied.
+    """
+    for bad, good in sorted(replacements.items(), key=lambda x: -len(x[0])):
+        pattern = re.compile(r'\b' + re.escape(bad) + r'\b', re.IGNORECASE)
+        text = pattern.sub(good, text)
+    return text
 
 
 def main() -> int:
     """
-    Main entry point for command-line execution.
-    Handles argument parsing, directory checks, and batch processing logic.
+    CLI entry point for yatsee_normalize_structure.py.
 
-    :return: Exit code (0 for success, 1 for failure)
+    Handles argument parsing, config loading, input/output directory resolution,
+    spaCy model loading, batch processing of transcript files, normalization,
+    sentence splitting, and applying entity-specific replacements.
+
+    Uses the merged config system to provide safe defaults and cascading entity
+    overrides for paths, models, and text replacements.
+
+    :return: Exit code 0 = success, 1 = failure
     """
     parser = argparse.ArgumentParser(
-        description="Split transcript text files into individual sentences.",
+        description="Normalize transcripts and split into sentences using spaCy."
     )
-    parser.add_argument(
-        "--txt-input",
-        "-i",
-        required=True,
-        help="Input .txt file or directory",
-    )
-    parser.add_argument(
-        "--output-dir",
-        "-o",
-        default="normalized",
-        help="Output directory for processed files (default: ./normalized)",
-    )
-    parser.add_argument(
-        "--no-spacy",
-        action="store_true",
-        help="Disable spaCy sentence segmentation (use line breaks instead)",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Overwrite existing output files",
-    )
-    parser.add_argument(
-        "--deep-clean",
-        action="store_true",
-        help="Enable deeper text normalization (remove fillers, brackets, etc.)",
-    )
-    parser.add_argument(
-        "--preserve-paragraphs",
-        action="store_true",
-        help="Keep paragraphs separated by blank lines, splitting sentences inside paragraphs",
-    )
+    parser.add_argument("-e", "--entity", help="Entity handle to process")
+    parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to global yatsee.toml")
+    parser.add_argument("-i", "--input-dir", type=str, help="Input file or directory")
+    parser.add_argument("-o", "--output-dir", type=str, help="Output directory")
+    parser.add_argument("-m", "--model", type=str, help="spaCy model to use (e.g. en_core_web_md)")
+    parser.add_argument("--no-spacy", action="store_true", help="Disable spaCy sentence splitting")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing files")
+    parser.add_argument("--deep-clean", action="store_true", help="Enable deep cleaning")
+    parser.add_argument("--preserve-paragraphs", action="store_true", help="Keep paragraph breaks")
     args = parser.parse_args()
 
-    # Collect txt files from input path
-    if not args.txt_input:
-        print("❌ No input file or directory specified. Use --txt-input to set one.", file=sys.stderr)
-        return 1
-
-    try:
-        # This needs to look for .punct.txt from the previous step
-        all_files = get_files_list(args.txt_input)
-        file_list = [f for f in all_files if f.lower().endswith('.punct.txt')]
-        if not file_list:
-            raise FileNotFoundError(f"No .punct.txt files found in directory: {args.txt_input}")
-    except (FileNotFoundError, ValueError) as e:
-        print(f"❌ {e}", file=sys.stderr)
-        return 1
-
-    # Determine output directory, default to the ./summary directory
-    output_dir = args.output_dir
-    os.makedirs(output_dir, exist_ok=True)
-
-    use_spacy = not args.no_spacy
-    spacy_model = None
-    if use_spacy:
+    # Determine input/output paths
+    entity_cfg = {}
+    if args.entity:
+        # Load entity config
         try:
-            spacy_model = load_spacy_model()
+            global_cfg = load_global_config(args.config)
+            entity_cfg = load_entity_config(global_cfg, args.entity)
+        except Exception as e:
+            print(f"❌ Config load failed: {e}", file=sys.stderr)
+            return 1
+    else:
+        # Require input if no entity is provided
+        if not args.input_dir:
+            print("❌ Without --entity, --input-dir must be defined", file=sys.stderr)
+            return 1
+
+    # Determine input/output directory based on entity or CLI override
+    append_dir = args.input_dir or entity_cfg.get("transcription_model", "small")
+    input_dir = args.input_dir or os.path.join(entity_cfg["data_path"], f'transcripts_{append_dir}')
+    file_list = discover_files(input_dir, ".txt")
+    if not file_list:
+        print("↪ No .txt input files found", file=sys.stderr)
+        return 0
+
+    # By default, output directory is the normalized directory
+    output_directory = args.output_dir or os.path.join(entity_cfg["data_path"], 'normalized')
+    if not os.path.isdir(output_directory):
+        print(f"✓ Output directory will be created: {output_directory}", file=sys.stderr)
+        os.makedirs(output_directory, exist_ok=True)
+
+    # ----------------------------
+    # Load spaCy model if enabled
+    # ----------------------------
+    spacy_model = None
+    if not args.no_spacy:
+        spacy_model_name = (
+            args.model
+            or entity_cfg.get("sentence_model")
+            or global_cfg.get("system", {}).get("default_sentence_model", "en_core_web_sm")
+        )
+        if not spacy_model_name:
+            print("❌ No spaCy model specified from CLI, entity config, or system config.", file=sys.stderr)
+            return 1
+
+        try:
+            spacy_model = load_spacy_model(spacy_model_name)
+            print(f"✓ Using spaCy model: {spacy_model_name}")
         except OSError:
             print(
-                "❌ spaCy model not found. Install with: python -m spacy download en_core_web_sm",
-                file=sys.stderr,
+                f"❌ spaCy model '{spacy_model_name}' not found. Install with: "
+                f"python -m spacy download {spacy_model_name}",
+                file=sys.stderr
             )
             return 1
 
+    # Load replacements from flattened entity config
+    replacements = entity_cfg.get("replacements", {})
+
+    # Process each file
     for file_path in file_list:
-        # Get the original filename, e.g., "meeting.punct.txt"
         filename = os.path.basename(file_path)
-
-        # Create the desired output filename by replacing the intermediate extension
-        # "meeting.punct.txt" -> "meeting.txt"
-        output_filename = filename.replace('.punct.txt', '.txt')
-
-        # Construct the full path for the final output file
-        output_file = os.path.join(output_dir, output_filename)
+        output_file = os.path.join(output_directory, filename)
 
         if os.path.isfile(output_file) and not args.force:
             print(f"↪ Skipping existing: {output_file}")
             continue
 
-        # Get first pass normalized text using simple regex tools
-        with open(file_path, "r", encoding="utf-8") as infile:
-            raw_text = infile.read()
+        # Read, normalize, split, limit repetitions, and apply replacements
+        with open(file_path, "r", encoding="utf-8") as f:
+            raw_text = f.read()
 
-        # Perform cleaning and capitalization if required
-        normalized_text = normalize_text(raw_text, deep=args.deep_clean)
-        normalized_text = capitalize_sentences(normalized_text)
-        normalized_text = process_text_to_sentences(normalized_text, spacy_model, use_spacy, args.preserve_paragraphs)
-        processed_text = limit_repetitions(normalized_text, inline_max=2, line_max=1)
+        normalized = normalize_text(raw_text, deep=args.deep_clean)
+        normalized = capitalize_sentences(normalized)
+        processed = process_text_to_sentences(normalized, spacy_model, not args.no_spacy, args.preserve_paragraphs)
+        processed = limit_repetitions(processed, inline_max=2, line_max=1)
+        processed = apply_replacements(processed, replacements)
 
-        # Write the final clean file to the filesystem
+        # Write output
         with open(output_file, "w", encoding="utf-8") as f:
-            f.write(processed_text)
-            print(f"✓ Wrote: {output_file}")
+            f.write(processed)
+            print(f"✓ Processed: {output_file}")
 
     return 0
 

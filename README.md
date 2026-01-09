@@ -14,27 +14,121 @@ YATSEE solves that by using a carefully tuned local LLM to transform that wall o
 
 ---
 
+## 🚀 Quick Start (Plug-and-Play)
+
+Follow these steps to get YATSEE running.
+
+---
+
+### 1. **Clone the Repository**
+```bash
+git clone https://github.com/alias454/yatsee.git
+cd yatsee
+```
+
+---
+
+### 2. **Edit Initial Configuration**
+```bash
+# Copy the template to create your local config file
+cp yatsee.conf yatsee.toml
+```
+- Open `yatsee.toml` in any text editor.
+- Add at least **one entity** with the required fields:
+  - `entity` (unique identifier)
+
+---
+
+### 3. **Run the Setup Script**
+```bash
+chmod +x setup.sh
+./setup.sh
+```
+- Installs Python dependencies
+- Downloads NLP models (`spaCy`, etc.)
+- Checks for GPU (CUDA/MPS) and warns if only CPU is available
+
+---
+
+### 4. **Activate the Python Environment**
+```bash
+source .venv/bin/activate
+```
+> Python ≥3.10 recommended. CPU works, but GPU/MPS accelerates transcription.
+
+---
+
+### 5. **Run the Config Builder**
+```bash
+python yatsee_build_config.py --create
+```
+- Uses the entity info in `yatsee.toml` to:
+  - Create the main directory(default ./data) for the pipeline
+  - Initialize per-entity pipeline configs
+  - `sources.youtube.youtube_path` (YouTube channel/playlist)
+  - Any optional data structures like titles, people, replacements etc.
+- This is the **minimum viable entity** needed for the downloader.
+- **Important:** Run this after `setup.sh` and after adding at least one entity.
+
+---
+
+### 6. **Run the Processing Pipeline**
+```bash
+see Script Summary below
+```
+- Processes audio/video in `downloads/`
+- Converts to `.flac`/`.wav` in `audio/`
+- Generates transcripts, normalizes text, and produces summaries
+- All scripts are modular: you can run them individually or as a pipeline
+
+---
+
+### 7. **Launch the Demo Search UI**
+```bash
+streamlit run yatsee_search_demo.py -- -e entity_name_configured
+```
+- Provides semantic and structured search over transcripts and summaries
+
+---
+
+### ⚠️ Notes for New Users
+- `entity` is a unique key identifier for all scripts. Keep it consistent.
+- Each pipeline stage ensures directories exist for output; do **not** manually create them.
+- Optional: You can edit additional pipeline settings (like per-entity hotwords or divisions) in the generated config.
+
+---
+
 ## 📌 YATSEE Audio Pipeline Overview
 
 A modular pipeline for extracting, enriching, and summarizing civic meeting audio data.
 
-Scripts are modular, with clear input/output expectations.
+### Pipeline Flow Overview
+1. `downloads/` → raw video/audio  
+2. `audio/` → converted `.wav` or `.flac`  
+3. `transcripts_<model>/` → `.vtt` + flat `.txt`  
+4. `normalized/` → cleaned, structured `.txt`  
+5. `summary/` → `.md` or `.yaml` summaries
+
+YATSEE is designed as a collection of independent tools. While they work best as a unified pipeline, each script can be run standalone as long as the input data matches the Interface Contract.
 
 ### 1. Automated Download
-- **Script:** `yatsee_download_audio.sh`
+- **Script:** `yatsee_download_audio.py`
 - **Input:** YouTube URL (bestaudio)
 - **Output:** `.mp4` or `.webm` to `downloads/`
 - **Tool:** `yt-dlp`
   - **Purpose:** Archive livestream audio for local processing 
 
 ### 2. Convert Audio
-- **Script:** `yatsee_format_audio.sh`
+- **Script:** `yatsee_format_audio.py`
 - **Input:** `.mp4` or `.webm` from `downloads/`
 - **Output:** `.wav` or `.flac` to `audio/`
 - **Tool:** `ffmpeg`
 - **Format Settings:**
   - WAV: `-ar 16000 -ac 1 -sample_fmt s16 -c:a pcm_s16le`
   - FLAC `-ar 16000 -ac 1 -sample_fmt s16 -c:a flac`
+- **Notes:**
+  - Supports **chunked output** for long audio
+  - Optional overlap between chunks to prevent cutting phrases
 
 ### 3. Transcribe Audio
 - **Script:** `yatsee_transcribe_audio.py`
@@ -42,9 +136,9 @@ Scripts are modular, with clear input/output expectations.
 - **Output:** `.vtt` to `transcripts_<model>/`
 - **Tool:** `whisper` or `faster-whisper`
 - **Notes:**
-  - Supports `faster-whisper` if installed
+  - Supports **stitching chunked audio** back into a single transcript
   - Accepts model selection: `small`, `medium`, `large`, etc.
-  - Outputs to `transcripts_<model>/` by default
+  - Faster-whisper improves performance if installed
 
 ### 4. Clean and Normalize
 #### a. Strip Timestamps
@@ -58,23 +152,16 @@ Scripts are modular, with clear input/output expectations.
 - **Output:** `.jsonl` to same folder
   - **Purpose:** JSONL segments (sliced transcript for embeddings/search).
 
-#### c. Sentence Segmentation
-- **Script:** `yatsee_polish_transcript.py`
-- **Input:** `.txt` from `transcripts_<model>/`
-- **Output:** `.punct.txt` to `normalized/`
-- **Tool:** `deep multilingual punctuation model`
-  - **Purpose:** Deep learning punctuation.
-
-#### d. Text Normalization
+#### c. Text Normalization
 - **Script:** `yatsee_normalize_structure.py`
 - **Input:** `.punct.txt` from `normalized/`
-- **Output:** `.txt` to `normalized/`
+- **Output:** `.norm.txt` to `normalized/`
 - **Tool:** `spaCy`
   - **Purpose:** Segment text into readable sentences and normalize punctuation/spacing.
 
 ### 5. Summarize Transcripts using AI (Local LLM)
 - **Script:** `yatsee_summarize_transcripts.py`
-- **Input:** `.out` or `.txt` from `normalized/`
+- **Input:** `.txt` from `normalized/`
 - **Output:** `.md` or `.yaml` to `summary/`
 - **Tool:** `ollama`
 - **Notes:**
@@ -83,29 +170,52 @@ Scripts are modular, with clear input/output expectations.
 
 All scripts are modular and can be run independently or as part of an automated workflow.
 
-### Index & Search _(In Development)_
-- **Goal:** Turn the generated summaries and raw transcripts into a searchable civic intelligence database.
-- **Vector Search (Semantic):** Use ChromaDB with the `nomic-embed-text` model to allow for fuzzy, concept-based queries (e.g., "Find discussions about road repairs").
-- **Graph Search (Relational):** Extract structured data (Votes, Contracts, Appointments) into a knowledge graph to trace connections between people and money.
-- **UI:** A simple web interface built with Streamlit to provide an overview of the city's operations.
+### Index and Search _(In Development)_
+#### Index Data
+- **Script:** `yatsee_index_data.py`
+- **Input:** `.txt` from `normalized/`
+- **Input:** `.md` from `summary/`
+- **Output:** `embeddings` to `yatsee_db/`
+- **Tool:** `ChromaDB`
+- **Notes:**
+  - Generate embeddings from raw transcripts and summaries into a searchable civic intelligence database.
+  - **Vector Search (Semantic):** Uses ChromaDB with the `BAAI/bge-small-en-v1.5` model to allow for fuzzy, concept-based queries (e.g., "Find discussions about road repairs").
+
+#### Search _(In Development)_
+- **Script:** `yatsee_index_data.py`
+- **Input:** `.txt` from `normalized/`
+- **Input:** `.md` from `summary/`
+- **Input:** `embeddings` from `yatsee_db/`
+- **Tool:** `Streamlit and ChromaDB`
+- **Notes:**
+  - **UI:** A simple web interface built with Streamlit to provide an overview of the generated transcripts and summaries.
+  - Planned **Graph Search (Relational):** Extract structured data (Votes, Contracts, Appointments) into a knowledge graph to trace connections between people and money.
 
 ---
 
 ## 📁 Filesystem Layout
 
-    transcripts_pipeline/
-    │
-    ├── downloads/                ← raw input (audio/video)
-    ├── audio/                    ← post-conversion (.wav/.flac) files
+data/
+└── <entity_handle>/
+    ├── downloads/                ← Raw input (audio/video)
+    ├── audio/                    ← Converted 16kHz mono files
     ├── transcripts_<model>/      ← VTTs + initial flat .txt files
-    │   ├── meeting.vtt
-    │   └── meeting.txt           ← basic timestamp removal only
-    │
-    ├── normalized/               ← cleaned + structured output
-    │   └── meeting.txt           ← just structure normalization (spaCy)
-    │
-    ├── summary/                  ← generated meeting summaries (.yaml/.md) files
-    │   └── summary.md
+    ├── normalized/               ← Cleaned + structured output (spaCy)
+    ├── summary/                  ← Generated meeting summaries (.md/.yaml)
+    ├── yatsee_db/                ← Vector database files (ChromaDB)
+    └── conf.toml                 ← Localized entity config
+
+---
+
+## Config file routing/load order
+
+Global TOML
+    |
+    +--> Entity handle
+            |
+            +--> Local config (hotwords, divisions, data_path)
+                    |
+                    +--> Pipeline stage (downloads, audio, transcripts)
 
 ---
 
@@ -118,7 +228,7 @@ This pipeline was developed and tested on the following setup:
   - **Storage:** NVMe SSD
   - **OS:** Fedora Linux
   - **Shell:** Bash
-  - **Python:** 3.8 or newer
+  - **Python:** 3.10 or newer
 
 Additional testing was performed on Apple Silicon (macOS):
   - **Model:** Mac Mini (M4 Base)
@@ -135,9 +245,12 @@ Note: Audio transcription was much slower on the MAC than on Linux. it's doable 
 
 Note: The pipeline works on CPU-only systems without a GPU. However, transcription (especially with Whisper or faster-whisper) will be much slower compared to systems with CUDA-enabled GPU acceleration or MPS.
 
-> ⚠️ Not test on Windows. Use at your own risk on `Windows` platforms.
+> ⚠️ Not tested on Windows. Use at your own risk on `Windows` platforms.
 
 ---
+Manual Installation (If not using setup.sh)
+
+If you cannot use the setup script, ensure you have `ffmpeg` and `yt-dlp` installed via your package manager, then install the Python requirements:
 
 ### Required CLI Tools
 
@@ -222,53 +335,17 @@ See https://ollama.com for supported models and system requirements.
 ## 🚀 Running the Pipeline
 
 Run each script in sequence or independently as needed:
-
-### 1. Download Audio
-```bash
-./yatsee_download_audio.sh https://youtube.com/some-url
-```
-
-### 2. Convert to Audio Format
-```bash
-./yatsee_format_audio.sh
-```
-
-### 3. Transcribe Audio
-```bash
-python yatsee_transcribe_audio.py --audio_input ./audio --model medium --faster
-```
-
-### 4. Clean Text
-
-**Slice and segment vtt files for embeddings/search or Strip timestamps for txt**
-```bash
-python yatsee_slice_vtt.py --vtt-input transcripts_<model> --output-dir transcripts_<model> --window 30
-```
-
-**Normalize structure**
-```bash
-# Install
-  python -m spacy download en_core_web_sm
-  
-python yatsee_normalize_structure.py -i transcripts_medium/
-```
-
-### 5. Optional: Summarize Transcripts
-
-YATSEE includes an optional script for generating summaries using a local LLM via the ollama tool. This script demonstrates one possible downstream use of the normalized transcripts.
-
-```bash
-# Requires ollama and a pulled model
-python3 yatsee_summarize_transcripts.py -i normalized/ -m your_pulled_model
-```
+All scripts accept the -e (entity) flag to route data to the correct folders defined in yatsee.toml.
 
 ### 📄 Script Summary
 
-| Script                            | Purpose                                       |
-|-----------------------------------|-----------------------------------------------|
-| `yatsee_download_audio.sh`        | Download audio from YouTube URLs              |
-| `yatsee_format_audio.sh`          | Convert downloaded files to `.flac` or `.wav` |
-| `yatsee_transcribe_audio.py`      | Transcribe audio files to `.vtt`              |
-| `yatsee_slice_vtt.py `            | Slice and segment `.vtt` files                |
-| `yatsee_normalize_structure.py`   | Clean and normalize text structure            |
-| `yatsee_summarize_transcripts.py` | Generate summaries from cleaned transcripts   |
+| Script                                                | Purpose                                       |
+|-------------------------------------------------------|-----------------------------------------------|
+| `python3 yatsee_download_audio.py -e <entity>`        | Download audio from YouTube URLs              |
+| `python3 yatsee_format_audio.py -e <entity>`          | Convert downloaded files to `.flac` or `.wav` |
+| `python3 yatsee_transcribe_audio.py -e <entity>`      | Transcribe audio files to `.vtt`              |
+| `python3 yatsee_slice_vtt.py -e <entity>`             | Slice and segment `.vtt` files                |
+| `python3 yatsee_normalize_structure.py -e <entity>`   | Clean and normalize text structure            |
+| `python3 yatsee_summarize_transcripts.py -e <entity>` | Generate summaries from cleaned transcripts   |
+| `python3 yatsee_index_data.py -e <entity>`            | Vectorize and index embeddings                |
+| `streamlit run yatsee_search_demo.py -- -e <entity>`  | Search summaries and transcripts              |
