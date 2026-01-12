@@ -336,15 +336,14 @@ def download_audio(video_id: str, output_dir: str, dry_run: bool = False,) -> Di
         "user_agent": user_agent,
 
         # Audio extraction
-        "postprocessors": [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
+        # "postprocessors": [{
+        #     "key": "FFmpegExtractAudio",
+        #     "preferredcodec": "flac",
+        # }],
 
         # Silence yt-dlp; caller owns logging
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": False,
+        "no_warnings": False,
     }
 
     # Randomized politeness delay matches shell script intent

@@ -14,6 +14,10 @@ YATSEE solves that by using a carefully tuned local LLM to transform that wall o
 
 ---
 
+<video src="./yatsee_demo.mp4" controls width="600"></video>
+
+---
+
 ## 🚀 Quick Start (Plug-and-Play)
 
 Follow these steps to get YATSEE running.
