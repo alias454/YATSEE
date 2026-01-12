@@ -2,18 +2,31 @@
 """
 yatsee_format_audio.py
 
-Stage 2 of YATSEE: Normalize downloaded media into mono 16kHz WAV or FLAC for
-Whisper-style transcription models.
+Stage 2 of YATSEE: Normalize downloaded media into mono 16kHz WAV or FLAC
+for Whisper-style transcription models.
+
+Purpose:
+  - Converts raw downloaded media to a transcription-ready format.
+  - Optionally splits long audio into sequential chunks with overlap.
+  - Tracks processed files via SHA-256 to prevent redundant work.
 
 Input/Output:
-  - Input: Downloaded media files (.mp4, .webm, .m4a) in 'downloads/' under
-    the entity_handle data directory
+  - Input: Media files (.mp4, .webm, .m4a) located in 'downloads/'
+    under the entity_handle data directory or a direct input path
   - Output: Normalized audio (.wav or .flac) in 'audio/' under entity_handle
-  - Output: Optional audio chunks with optional overlap.
+  - Output (optional): Sequential chunks in 'audio/chunks/<base_name>/'
+
+Key Features:
+  - Dry-run mode to preview operations without writing files
+  - Force mode to reprocess already converted files
+  - Automatic creation of output directories if missing
+  - Uses external ffmpeg and ffprobe tools for conversion and duration checks
+  - Safe handling of invalid files and unexpected exceptions
 
 Dependencies:
   - ffmpeg
-  - toml (for global/entity config parsing)
+  - ffprobe
+  - toml (for global/entity configuration parsing)
 
 Usage Examples:
   ./yatsee_format_audio.py -e entity_handle --create-chunks --force
@@ -21,35 +34,38 @@ Usage Examples:
 
 Design Notes:
   - Resolves entity_handle from global yatsee.toml and optional local config
-  - Tracks processed files via SHA-256 hashes to prevent redundant conversions
-  - Supports dry-run, force, and direct data-path overrides
-  - Only processes valid media and keeps all side-effects within entity's folder
-  - Split long audio files into fixed-duration chunks
-  - Modular functions: config loading, source discovery, hashing, and conversion
-  - Safe defaults used when config entries are missing
+  - Tracks processed files via SHA-256 hashes
+  - Modular design: config loading, file discovery, hashing, conversion, and chunking
+  - Preserves original media; chunks are additional outputs
+  - Defaults used when config entries are missing or incomplete
 """
 
-import os
-import sys
-import toml
+# Standard library
 import argparse
-import json
 import hashlib
+import os
 import subprocess
-from typing import List, Set, Dict, Any
+import sys
+import textwrap
+from typing import Any, Dict, List, Set
 
+# Third-party imports
+import toml
 
 SUPPORTED_INPUT_EXTENSIONS = (".m4a", ".mp4", ".webm")
 
 
 def load_global_config(path: str) -> Dict[str, Any]:
     """
-    Load the global YATSEE configuration file.
+    Load the global YATSEE configuration from a TOML file.
 
-    :param path: Path to yatsee.toml
-    :return: Parsed configuration dictionary
-    :raises FileNotFoundError: If file does not exist
-    :raises ValueError: If parsing fails
+    Raises an exception if the file is missing or invalid.
+    Ensures downstream code can rely on a complete global config dictionary.
+
+    :param path: Path to the global TOML configuration file
+    :return: Parsed configuration as a dictionary
+    :raises FileNotFoundError: If the config file does not exist
+    :raises ValueError: If TOML parsing fails
     """
     if not os.path.exists(path):
         raise FileNotFoundError(f"Global configuration file not found: {path}")
@@ -63,14 +79,14 @@ def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any
     """
     Load and merge entity-specific configuration with global defaults.
 
-    - Reserved keys 'settings' and 'meta' are flattened into the top level
-    - Provides merged config for an entity at runtime
+    Handles merging of reserved keys ("settings", "meta") from local config.
+    Ensures a flattened dictionary that the pipeline can consume safely.
 
-    :param global_cfg: Global YATSEE config dictionary
-    :param entity: Entity handle to resolve
+    :param global_cfg: Global configuration dictionary
+    :param entity: Entity handle to load
     :return: Merged entity configuration dictionary
+    :raises KeyError: If entity is missing from global config
     :raises FileNotFoundError: If local entity config is missing
-    :raises KeyError: If entity not defined in global config
     """
     reserved_keys = {"settings", "meta"}
 
@@ -103,11 +119,13 @@ def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any
 
 def compute_sha256(path: str) -> str:
     """
-    Compute SHA-256 hash of a file for tracking processed media.
+    Compute the SHA-256 hash of a file for tracking processed audio.
 
-    :param path: Absolute path to file
-    :return: Hex-encoded SHA-256 hash
-    :raises RuntimeError: If file cannot be read
+    Useful for deduplication and preventing redundant conversions.
+
+    :param path: Absolute path to the input file
+    :return: Hex-encoded SHA-256 hash string
+    :raises RuntimeError: If the file cannot be read
     """
     try:
         hasher = hashlib.sha256()
@@ -121,10 +139,10 @@ def compute_sha256(path: str) -> str:
 
 def load_tracked_hashes(tracker_path: str) -> Set[str]:
     """
-    Load SHA-256 hashes of already converted audio to prevent redundant work.
+    Load previously converted audio file hashes to avoid reprocessing.
 
-    :param tracker_path: Path to .converted tracker file
-    :return: Set of SHA-256 hashes
+    :param tracker_path: Path to the '.converted' tracker file
+    :return: Set of SHA-256 hash strings
     """
     if not os.path.exists(tracker_path):
         return set()
@@ -137,12 +155,16 @@ def load_tracked_hashes(tracker_path: str) -> Set[str]:
 
 def discover_files(input_path: str, supported_exts) -> List[str]:
     """
-    Collect files from a directory or single file based on allowed extensions.
+    Collect valid audio files from a directory or a single file.
 
-    :param input_path: Path to directory or file
-    :param supported_exts: Supported file extensions tuple
-    :return: Sorted list of valid audio file paths
-    :raises FileNotFoundError: If path does not exist
+    - Recursively checks only the specified directory or single file
+    - Filters by allowed file extensions
+    - Returns sorted list for predictable processing order
+
+    :param input_path: Path to a directory or single file
+    :param supported_exts: Tuple of allowed file extensions (e.g., '.mp4', '.m4a')
+    :return: Sorted list of file paths matching the extensions
+    :raises FileNotFoundError: If the path does not exist
     :raises ValueError: If file extension is unsupported
     """
     valid_exts = supported_exts
@@ -168,13 +190,15 @@ def discover_files(input_path: str, supported_exts) -> List[str]:
 
 def get_audio_duration(input_file: str)-> tuple[bool, float | None, str]:
     """
-    Get the total duration of an audio file in seconds.
+    Determine the duration of an audio file in seconds using ffprobe.
 
-    Uses ffprobe to inspect the file without loading into memory.
+    Does not load the audio into memory; relies on external ffprobe call.
 
-    :param input_file: Path to the FLAC/WAV audio file
-    :return Duration of the audio in seconds
-    :raises RuntimeError: If ffprobe fails or cannot parse duration
+    :param input_file: Path to the FLAC or WAV audio file
+    :return: Tuple(success: bool, duration: float | None, message: str)
+        - success: True if duration was obtained
+        - duration: Total audio length in seconds if successful, else None
+        - message: Status or error description
     """
     cmd = [
         "ffprobe", "-v", "error",
@@ -200,19 +224,20 @@ def chunk_audio_file(input_file: str, output_dir: str, total_duration: float, ch
     """
     Split a long audio file into sequential smaller chunks.
 
-    Notes:
-    - Ensures each chunk does not exceed chunk_duration
-    - Adds optional overlap to avoid cutting words/phrases at chunk boundaries
     - Output files are named sequentially with zero-padded indices
+    - Optional overlap prevents cutting words or phrases at boundaries
     - Does not modify the original input file
 
-    :param input_file: Path to the FLAC/WAV audio file
-    :param output_dir: Directory where chunks will be written
-    :param total_duration: Total duration of an audio file in seconds
-    :param chunk_duration: Desired length of each chunk in seconds (default: 600)
-    :param overlap: Seconds of overlap between consecutive chunks (default: 2)
-    :return: List of chunk file paths
-    :raises RuntimeError: If ffmpeg fails to generate a chunk
+    :param input_file: Path to the source audio file
+    :param output_dir: Directory where chunk files will be written
+    :param total_duration: Total length of the audio in seconds
+    :param chunk_duration: Duration of each chunk in seconds (default 600)
+    :param overlap: Overlap in seconds between consecutive chunks (default 2)
+    :return: Tuple(success: bool, chunks: List[str], message: str)
+        - success: True if chunking succeeded
+        - chunks: List of created chunk file paths
+        - message: Status or error description
+    :raises RuntimeError: If ffmpeg fails to generate chunks
     """
     chunks = []
     start = 0
@@ -250,15 +275,18 @@ def chunk_audio_file(input_file: str, output_dir: str, total_duration: float, ch
 
 def format_audio(input_src: str, output_path: str, file_format: str = "flac") -> tuple[bool, str]:
     """
-    Convert media files to normalized mono 16kHz audio for transcription.
+    Convert media files to mono 16kHz audio for transcription.
 
-    - Does not print or log; returns success status and message
-    - Caller decides whether to skip, retry, or stop on failure
+    - Supports WAV or FLAC output
+    - Returns success status and message; caller decides further action
+    - Does not log or raise exceptions; handles errors internally
 
-    :param input_src: Path to input source file
-    :param output_path: Full path to output file
-    :param file_format: 'wav' or 'flac'
-    :return: Tuple (success: bool, message: str)
+    :param input_src: Path to the input media file
+    :param output_path: Full path for the normalized output file
+    :param file_format: Desired audio format: 'wav' or 'flac'
+    :return: Tuple(success: bool, message: str)
+        - success: True if conversion succeeded
+        - message: Status description
     """
     if file_format not in {"wav", "flac"}:
         return False, f"Unsupported format: {file_format}"
@@ -281,15 +309,27 @@ def format_audio(input_src: str, output_path: str, file_format: str = "flac") ->
     except subprocess.CalledProcessError as e:
         return False, f"ffmpeg failed for {input_src}: {e.stderr.decode(errors='ignore')}"
 
-def main() -> int:
-    """
-    CLI entry point for YATSEE audio formatting stage.
 
-    :return: 0 on success, 1 on error
-    """
-    parser = argparse.ArgumentParser(description="YATSEE audio formatting stage")
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Format and optionally chunk audio files for YATSEE.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+            Requirements:
+              - Python 3.10+
+              - ffmpeg installed and available in PATH
+              - Supported input audio formats: mp3, wav, flac, etc.
+
+            Usage Examples:
+              python yatsee_format_audio.py -e defined_entity
+              python yatsee_format_audio.py --input-dir ./raw_audio --format wav
+              python yatsee_format_audio.py -e defined_entity --create-chunks --chunk-duration 300
+              python yatsee_format_audio.py --dry-run
+              python yatsee_format_audio.py -i ./raw_audio -o ./formatted_audio --force
+        """)
+    )
     parser.add_argument("-e", "--entity", help="Entity handle to process")
-    parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to global yatsee.toml")
+    parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to the global YATSEE configuration file")
     parser.add_argument("-i", "--input-dir", help="Direct override path to entity data directory")
     parser.add_argument("-o", "--output-dir", help="Directory to save audio")
     parser.add_argument("--format", default="flac", choices=["wav", "flac"], help="Output audio format")

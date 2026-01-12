@@ -11,16 +11,18 @@ Design constraints:
 - Search logic is UI-agnostic and reusable
 """
 
-import os
-import sys
+# Standard library
 import argparse
 import math
+import os
 import re
 from glob import glob
-from typing import Dict, Any, List
+from typing import Any, Dict, List
+import sys
 
-import streamlit as st
+# Third-party imports
 import chromadb
+import streamlit as st
 import toml
 from sentence_transformers import SentenceTransformer
 

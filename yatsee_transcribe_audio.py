@@ -1,56 +1,67 @@
-#!/usr/bin/env python3
 """
 yatsee_transcribe_audio.py
 
-Stage 3 of YATSEE: Transcribe audio files to WebVTT using Whisper or faster-whisper.
+Stage 3 of YATSEE: Transcribe audio files to WebVTT (.vtt) using Whisper or faster-whisper.
+
+Purpose:
+  - Convert audio (.mp3, .wav, .flac, .m4a) into text transcripts for downstream
+    processing, search, and indexing.
+  - Supports both single audio files and chunked audio for improved model performance.
 
 Input/Output:
-  - Input: Audio files (.mp3, .wav, .flac, .m4a) in 'audio/' or specified path under
-    entity handle.
-    Supports optional chunked audio processing under 'audio/chunks/<file_basename>/'.
-  - Output: Transcripts (.vtt) written to 'transcripts_<model>/' under the entity's
-    data path or specified output directory. Overlapping or dangling segments are
-    merged for clarity.
+  - Input: Audio files under 'audio/' or user-specified directory.
+           Optional chunked files under 'audio/chunks/<file_basename>/'
+  - Output: Transcripts (.vtt) stored in 'transcripts_<model>/' under entity data
+            path or specified output directory. Overlapping or near-overlapping
+            segments are merged for clarity.
+
+Key Features:
+  - Automatically skips already-transcribed files using SHA-256 hash tracking
+  - Supports hotwords from titles and people aliases in entity config
+  - Verbose or quiet output modes
+  - CPU, CUDA, and Apple MPS device support with automatic fallback
+  - Deterministic output contained within entity's data path
 
 Dependencies:
   - whisper or faster-whisper
-  - torch
-  - torchaudio
-  - toml (for config parsing)
-  - tqdm
+  - torch, torchaudio
+  - toml (for configuration)
+  - tqdm (for progress bars)
 
 Usage Examples:
-  ./yatsee_transcribe_audio.py -e entity_handle --audio_input ./audio --model small
-  ./yatsee_transcribe_audio.py --audio_input ./downloads/video.mp4 --faster --lang en
+  ./yatsee_transcribe_audio.py -e entity_handle --audio-input ./audio --model small
+  ./yatsee_transcribe_audio.py --audio-input ./downloads/video.mp4 --faster --lang en
   ./yatsee_transcribe_audio.py -i ./single_file.mp3 -d cpu --lang es
-  ./yatsee_transcribe_audio.py --audio_input ./audio_folder -o ./transcripts/
+  ./yatsee_transcribe_audio.py --audio-input ./audio_folder -o ./transcripts/
 
-Features / Design Notes:
-  - Loads flat entity configuration by merging global yatsee.toml with local entity config.
-  - Automatically skips already-transcribed files using SHA-256 hash tracking.
-  - Supports hotwords extracted from titles and people aliases in entity configs.
-  - Single progress bar per file, updated across all chunks for consistent user experience.
-  - Cleanly merges overlapping or near-overlapping segments to maintain VTT quality.
-  - Works on CPU, CUDA, or Apple MPS, with fallbacks for faster-whisper limitations.
-  - Outputs are deterministic, contained within the entity's data path.
+Design Notes:
+  - Loads flat entity configuration by merging global yatsee.toml with local entity config
+  - Cleanly merges overlapping segments to maintain VTT quality
+  - Tracks processed files via SHA-256 hashes to prevent redundant transcription
+  - Supports chunked audio to handle long recordings efficiently
+  - Modular functions for config, hashing, file discovery, hotword flattening,
+    segment normalization, and VTT writing
 """
 
-import hashlib
+# Standard library
 import argparse
+import gc
+import hashlib
+import importlib.util
 import os
 import sys
-import time
 import textwrap
-import importlib.util
+import time
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional, Set
 
-import warnings
-import gc
-import toml
+# Third-party imports
 import torch
 import torchaudio
+import toml
 from tqdm import tqdm
-from typing import List, Dict, Optional, Any, Set
-from types import SimpleNamespace
+
+import warnings
 
 # Suppress specific warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torchaudio")
@@ -64,12 +75,15 @@ SUPPORTED_INPUT_EXTENSIONS = (".mp3", ".wav", ".flac", ".m4a")
 
 def load_global_config(path: str) -> Dict[str, Any]:
     """
-    Load the global YATSEE configuration file.
+    Load the global YATSEE configuration from a TOML file.
 
-    :param path: Path to the global TOML config file
-    :return: Parsed global configuration as a dictionary
-    :raises FileNotFoundError: If the file does not exist
-    :raises ValueError: If the TOML cannot be parsed
+    Raises an exception if the file is missing or invalid.
+    Ensures downstream code can rely on a complete global config dictionary.
+
+    :param path: Path to the global TOML configuration file
+    :return: Parsed configuration as a dictionary
+    :raises FileNotFoundError: If the config file does not exist
+    :raises ValueError: If TOML parsing fails
     """
     if not os.path.exists(path):
         raise FileNotFoundError(f"Global configuration file not found: {path}")
@@ -83,10 +97,13 @@ def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any
     """
     Load and merge entity-specific configuration with global defaults.
 
+    Handles merging of reserved keys ("settings", "meta") from local config.
+    Ensures a flattened dictionary that the pipeline can consume safely.
+
     :param global_cfg: Global configuration dictionary
-    :param entity: Entity handle to load (e.g., 'us_ca_fresno_city_council')
+    :param entity: Entity handle to load
     :return: Merged entity configuration dictionary
-    :raises KeyError: If entity is not defined in global config
+    :raises KeyError: If entity is missing from global config
     :raises FileNotFoundError: If local entity config is missing
     """
     reserved_keys = {"settings", "meta"}
@@ -120,10 +137,10 @@ def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any
 
 def load_flat_hotwords(entity_cfg: Dict[str, Any]) -> Optional[str]:
     """
-    Flatten titles and people aliases into a single comma-separated string.
+    Flatten entity titles and people aliases into a comma-separated hotwords string.
 
-    :param entity_cfg: Merged entity config
-    :return: Comma-separated hotwords string or None if empty
+    :param entity_cfg: Merged configuration dictionary for the entity
+    :return: Comma-separated string of hotwords, or None if no hotwords found
     """
     hotwords: Set[str] = set()
 
@@ -143,10 +160,12 @@ def load_flat_hotwords(entity_cfg: Dict[str, Any]) -> Optional[str]:
 
 def get_audio_duration(audio_path: str) -> float:
     """
-    Calculate the duration of an audio file in seconds.
+    Return the duration of an audio file in seconds.
 
-    :param audio_path: Path to the audio file.
-    :return: Duration of the audio in seconds as a float.
+    Uses torchaudio to read file metadata. Returns 0.0 if file cannot be read.
+
+    :param audio_path: Path to the audio file
+    :return: Duration in seconds as a float
     """
     try:
         info = torchaudio.info(audio_path)
@@ -158,10 +177,12 @@ def get_audio_duration(audio_path: str) -> float:
 
 def discover_files(input_path: str, supported_exts) -> List[str]:
     """
-    Collect files from a directory or single file based on allowed extensions.
+    Recursively collect audio files from a directory or single file.
 
-    :param input_path: Path to directory or file
-    :param supported_exts: Supported file extensions tuple
+    Filters by allowed extensions and returns a sorted list of file paths.
+
+    :param input_path: Directory or single audio file path
+    :param supported_exts: Tuple of supported file extensions (e.g., '.mp3', '.wav')
     :return: Sorted list of valid audio file paths
     :raises FileNotFoundError: If path does not exist
     :raises ValueError: If file extension is unsupported
@@ -189,10 +210,12 @@ def discover_files(input_path: str, supported_exts) -> List[str]:
 
 def compute_sha256(path: str) -> str:
     """
-    Compute SHA-256 hash of a file for tracking processed media.
+    Compute the SHA-256 hash of a file.
 
-    :param path: Absolute path to file
-    :return: Hex-encoded SHA-256 hash
+    Used to track already-transcribed audio and prevent redundant processing.
+
+    :param path: Path to the file
+    :return: Hexadecimal SHA-256 hash string
     :raises RuntimeError: If file cannot be read
     """
     try:
@@ -207,10 +230,12 @@ def compute_sha256(path: str) -> str:
 
 def load_tracked_hashes(tracker_path: str) -> Set[str]:
     """
-    Load SHA-256 hashes of already converted audio to prevent redundant work.
+    Load SHA-256 hashes from a tracker file.
 
-    :param tracker_path: Path to .converted tracker file
-    :return: Set of SHA-256 hashes
+    Returns an empty set if the tracker file does not exist.
+
+    :param tracker_path: Path to '.vtt_hash' file
+    :return: Set of SHA-256 hash strings
     """
     if not os.path.exists(tracker_path):
         return set()
@@ -223,7 +248,9 @@ def load_tracked_hashes(tracker_path: str) -> Set[str]:
 
 def clear_gpu_cache() -> None:
     """
-    Clear PyTorch CUDA cache and invoke garbage collection.
+    Clear PyTorch GPU cache and trigger garbage collection.
+
+    Useful to reduce memory pressure when transcribing large audio files on CUDA devices.
     """
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -235,7 +262,7 @@ def format_vtt_timestamp(seconds: float) -> str:
     Convert seconds to WebVTT timestamp format HH:MM:SS.mmm.
 
     :param seconds: Time in seconds
-    :return: Formatted timestamp
+    :return: Formatted timestamp string
     """
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
@@ -246,8 +273,12 @@ def format_vtt_timestamp(seconds: float) -> str:
 
 def normalize_segments(segments):
     """
-    Convert segments to objects with 'start', 'end', 'text' attributes.
-    Works with dicts or objects.
+    Convert transcription segments to objects with 'start', 'end', and 'text' attributes.
+
+    Handles both dict-based segments and objects returned by different Whisper models.
+
+    :param segments: List of segment dicts or objects
+    :return: List of SimpleNamespace objects with 'start', 'end', 'text'
     """
     normalized = []
     for seg in segments:
@@ -263,13 +294,12 @@ def normalize_segments(segments):
 
 
 def main() -> int:
-    """Main entry point for transcribing audio files to VTT format."""
     parser = argparse.ArgumentParser(
         description="Transcribe audio files to WebVTT (.vtt) using whisper or faster-whisper.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
             Requirements:
-              - Python 3.9+
+              - Python 3.10+
               - torch (PyTorch)
               - whisper (https://github.com/openai/whisper)
               - faster-whisper (optional, https://github.com/guillaumekln/faster-whisper)
@@ -289,7 +319,7 @@ def main() -> int:
         help="Device for model execution: 'cuda' for NVIDIA GPU, 'mps' for Apple Silicon Support, 'cpu' for compatibility. Default is 'auto'"
     )
     parser.add_argument("-e", "--entity", help="Entity handle to process")
-    parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to global yatsee.toml")
+    parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to the global YATSEE configuration file")
     parser.add_argument("-i", "--audio-input", help="Audio file or directory (Defaults to ./audio)")
     parser.add_argument("-o", "--output-dir", help="Directory to save transcripts")
     parser.add_argument("-g", "--get-chunks", action="store_true", help="Transcribe using audio chunk files")

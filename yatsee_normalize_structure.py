@@ -2,49 +2,63 @@
 """
 yatsee_normalize_structure.py
 
-Layer 3 Normalize: Clean, normalize, and split polished transcripts into
-sentence-per-line files for downstream summarization, embedding, or indexing.
+Stage 4c of the YATSEE pipeline: Normalize and clean polished transcripts
+into sentence-per-line files ready for summarization, embedding, or indexing.
 
-Input/Output:
-  - Input: .punct.txt files from 'normalized/' under entity_handle (Layer 2 Transform)
-  - Output: Cleaned .txt files in 'normalized/' under same entity_handle (Layer 3 Normalize)
+Inputs:
+  - ..txt files from 'normalized/' under the entity data path (Layer 2 Transform)
+  - Custom input directories or files via --input-dir
+
+Outputs:
+  - Cleaned .txt files with one sentence per line in the 'normalized/' directory
+    under the same entity handle
+  - Optional paragraph preservation and deep cleaning
+
+Key Features:
+  - Robust text normalization:
+      * Collapses character and phrase repetitions
+      * Removes filler words and bracketed content (optional deep clean)
+      * Corrects punctuation, spacing, and capitalization
+      * Preserves numbers, acronyms, and entity names
+  - Sentence splitting using spaCy, with optional paragraph preservation
+  - Limits consecutive and inline repetitions
+  - Entity-specific replacements and cascading configuration from global + local TOML
+  - Safe defaults, CLI verbosity, and force-overwrite support
 
 Dependencies:
-  - spaCy for sentence segmentation
-  - toml for global + entity config parsing
-  - re, argparse, os, sys for file and text handling
+  - Python 3 standard libraries: os, sys, re, argparse, typing
+  - Third-party: spaCy, toml
 
-Usage Examples:
-  ./yatsee_normalize_structure.py -e entity_handle
+Example Usage:
+  ./yatsee_normalize_structure.py -e defined_entity
   ./yatsee_normalize_structure.py -i ./normalized -o ./normalized --deep-clean
-
-Design Notes:
-  - Loads and merges global yatsee.toml with optional entity-specific config
-  - Preserves paragraph breaks, applies entity-specific replacements, and limits
-    inline and consecutive line repetitions
-  - Supports optional spaCy sentence splitting, deep cleaning, and force-overwrite
-  - Modular: separates config loading, text normalization, sentence splitting,
-    repetition handling, and replacements
-  - Outputs files ready for Layer 4 summarization or downstream NLP pipelines
+  ./yatsee_normalize_structure.py -e entity_handle --no-spacy --preserve-paragraphs
 """
 
-import os
-import sys
+# Standard library
 import argparse
+import os
 import re
-from typing import List, Dict, Any, Optional
-import toml
+import sys
+import textwrap
+from typing import Any, Dict, List, Optional
+
+# Third-party imports
 import spacy
+import toml
 
 
 def load_global_config(path: str) -> Dict[str, Any]:
     """
-    Load the global YATSEE configuration file.
+    Load the global YATSEE configuration from a TOML file.
 
-    :param path: Path to the global TOML config file
-    :return: Parsed global configuration as a dictionary
-    :raises FileNotFoundError: If the file does not exist
-    :raises ValueError: If the TOML cannot be parsed
+    Raises an exception if the file is missing or invalid.
+    Ensures downstream code can rely on a complete global config dictionary.
+
+    :param path: Path to the global TOML configuration file
+    :return: Parsed configuration as a dictionary
+    :raises FileNotFoundError: If the config file does not exist
+    :raises ValueError: If TOML parsing fails
     """
     if not os.path.exists(path):
         raise FileNotFoundError(f"Global configuration file not found: {path}")
@@ -58,10 +72,13 @@ def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any
     """
     Load and merge entity-specific configuration with global defaults.
 
+    Handles merging of reserved keys ("settings", "meta") from local config.
+    Ensures a flattened dictionary that the pipeline can consume safely.
+
     :param global_cfg: Global configuration dictionary
-    :param entity: Entity handle to load (e.g., 'us_ca_fresno_city_council')
+    :param entity: Entity handle to load
     :return: Merged entity configuration dictionary
-    :raises KeyError: If entity is not defined in global config
+    :raises KeyError: If entity is missing from global config
     :raises FileNotFoundError: If local entity config is missing
     """
     reserved_keys = {"settings", "meta"}
@@ -95,15 +112,14 @@ def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any
 
 def discover_files(input_path: str, supported_exts, exclude_suffix: str = None) -> List[str]:
     """
-    Collect files from a directory or single file based on allowed extensions,
-    optionally excluding files with a specific suffix.
+    Collect files from a directory or single file based on allowed extensions.
 
     :param input_path: Path to directory or file
-    :param supported_exts: Supported file extensions (str or tuple)
-    :param exclude_suffix: Optional suffix to exclude (e.g., '.punct.txt')
+    :param supported_exts: Supported file extensions tuple (e.g., ".vtt, .txt")
+    :param exclude_suffix: Optional suffix to exclude from results
     :return: Sorted list of valid file paths
     :raises FileNotFoundError: If path does not exist
-    :raises ValueError: If file extension is unsupported
+    :raises ValueError: If single file has unsupported extension
     """
     files: List[str] = []
 
@@ -135,7 +151,7 @@ def load_spacy_model(model_name: str) -> spacy.language.Language:
 
     :param model_name: Name of the spaCy model (e.g., 'en_core_web_sm').
     :return: Loaded spaCy Language object.
-    :raises OSError: If the spaCy model is not installed.
+    :raises OSError: If the model is not installed.
     """
     return spacy.load(model_name)
 
@@ -298,6 +314,17 @@ def normalize_text(text: str, deep: bool = False, preserve_entities: Optional[Li
 
 
 def normalize_text_minimal(text: str) -> str:
+    """
+    Perform minimal transcript normalization.
+
+    Notes:
+    - Cleans whitespace and repeated characters.
+    - Fixes numbers and currency formatting.
+    - Capitalizes first letters of sentences.
+
+    :param text: Raw transcript text.
+    :return: Partially normalized text.
+    """
     # Normalize whitespace
     text = re.sub(r'[\s\r\n\u00A0]+', ' ', text)
 
@@ -344,11 +371,11 @@ def process_text_to_sentences(
     - Falls back to simple newline splitting if spaCy is disabled or unavailable.
 
     :param text: Input text.
-    :param model: Optional spaCy Language model for sentence splitting.
-    :param use_spacy: Enable spaCy-based splitting.
-    :param preserve_paragraphs: Keep paragraph separation with blank lines.
-    :param trim_whitespace: Strip leading/trailing whitespace from each sentence.
-    :return: Text string with one sentence per line.
+    :param model: Optional spaCy model for splitting.
+    :param use_spacy: Enable spaCy-based sentence splitting.
+    :param preserve_paragraphs: Keep paragraph separation as blank lines.
+    :param trim_whitespace: Strip leading/trailing spaces from sentences.
+    :return: Text split into one sentence per line.
     """
     text = text.strip()
 
@@ -389,23 +416,23 @@ def apply_replacements(text: str, replacements: Dict[str, str]) -> str:
 
 
 def main() -> int:
-    """
-    CLI entry point for yatsee_normalize_structure.py.
-
-    Handles argument parsing, config loading, input/output directory resolution,
-    spaCy model loading, batch processing of transcript files, normalization,
-    sentence splitting, and applying entity-specific replacements.
-
-    Uses the merged config system to provide safe defaults and cascading entity
-    overrides for paths, models, and text replacements.
-
-    :return: Exit code 0 = success, 1 = failure
-    """
     parser = argparse.ArgumentParser(
-        description="Normalize transcripts and split into sentences using spaCy."
+        description="Normalize transcripts and split into sentence-per-line files.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+            Requirements:
+              - Python 3.10+
+              - spaCy (for sentence splitting)
+              - toml (for config parsing)
+
+            Usage Examples:
+              python yatsee_normalize_structure.py -e defined_entity
+              python yatsee_normalize_structure.py --input-dir ./normalized --output-dir ./normalized_out
+              python yatsee_normalize_structure.py -i ./normalized/file.txt --deep-clean
+        """)
     )
     parser.add_argument("-e", "--entity", help="Entity handle to process")
-    parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to global yatsee.toml")
+    parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to the global YATSEE configuration file")
     parser.add_argument("-i", "--input-dir", type=str, help="Input file or directory")
     parser.add_argument("-o", "--output-dir", type=str, help="Output directory")
     parser.add_argument("-m", "--model", type=str, help="spaCy model to use (e.g. en_core_web_md)")
