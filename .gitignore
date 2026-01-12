@@ -14,6 +14,9 @@ downloads/
 *.webm
 *.mp4
 
+# Allow demo
+!yatsee_demo.mp4
+
 # Audio
 audio/
 *.wav
