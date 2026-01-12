@@ -14,7 +14,7 @@ YATSEE solves that by using a carefully tuned local LLM to transform that wall o
 
 ---
 
-[Demo Video](yatsee_demo.mp4)
+[▶ Demo video](yatsee_demo.mp4)
 
 ---
 
