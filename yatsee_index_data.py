@@ -14,17 +14,20 @@ Features:
 - Index both summaries and transcripts into ChromaDB
 """
 
+# Standard library
 import argparse
 import os
-import sys
 import re
+import sys
 from glob import glob
-from typing import Dict, Any, List, Tuple
-from tqdm import tqdm
+from typing import Any, Dict, List, Tuple
+
+# Third-party imports
 import chromadb
-from sentence_transformers import SentenceTransformer
 import spacy
 import toml
+from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
 
 
 def load_global_config(path: str) -> Dict[str, Any]:

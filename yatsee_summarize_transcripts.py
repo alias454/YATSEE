@@ -1,88 +1,107 @@
 #!/usr/bin/env python3
 """
-YATSEE Transcript Summarizer (Current Version)
-----------------------------------------------
+yatsee_summarize_transcripts.py
 
-This tool summarizes transcripts (e.g., city council, committee meetings) using a local LLM via Ollama.
-Chunk summaries are now kept in memory only; no intermediate files are written to disk.
+Stage 5 of the YATSEE pipeline: Summarize transcripts from civic meetings
+(city council, committee, town hall, etc.) using a local LLM via Ollama.
+Chunk summaries are kept in memory only; no intermediate files are written
+to disk.
 
-Usage examples:
-  python yatsee_summarize_transcripts.py --model llama3 -i council_meeting_2025_06_01 --context "City Council Meeting - June 2025"
-  python yatsee_summarize_transcripts.py --model mistral -i firehall_meeting_2025_05 --context "Fire Hall Proposal Discussion"
-  python yatsee_summarize_transcripts.py --model mistral -i firehall_meeting_2025_05 --output-format markdown
-
-Requirements:
-  - Ollama running locally: https://ollama.com
-  - A supported model pulled locally (e.g. `ollama pull mistral`, `ollama pull llama3`)
-
-Example models:
-  - `mistral`: small, fast, reliable (good for quick summarization or resource-limited setups)
-  - `llama3`: slower, but better at reasoning and context retention (ideal for complex transcripts)
-
-Features:
-  - Auto-classifies meeting type using transcript snippet + optional fallback based on filename
-  - Dynamically selects summarization prompts based on meeting type (city council, finance committee, etc.)
-  - Optional manual prompt overrides for fine control (--first-prompt, --second-prompt, --final-prompt)
-  - Summarizes long transcripts in memory chunks with automatic merging
-  - Supports multi-pass summarization up to a configurable depth (--max-passes)
-  - Works entirely with local models via Ollama’s `/api/generate` endpoint
-  - Modular prompt system for summary styles (overview, action items, detailed, exhaustive, final pass, etc.)
-  - Memory-first design for privacy and performance — no intermediate files written to disk
-
-Arguments:
-  -i / --input-dir         Directory or file path of transcripts to summarize
-  --model                  Model to use (e.g., llama3, mistral)
-  --context                Optional human-readable meeting name (used for summary clarity)
-  --output-dir             Directory to save final merged summaries (default: ./summary/)
-  --output-format          'markdown' (default) or 'yaml'
-  --first-prompt           Optional manual prompt ID for first summarization pass
-  --second-pass-prompt     Optional manual prompt ID for second summarization pass
-  --max-words              Approximate word count per memory chunk (default: 3500)
-  --max-passes             Maximum summarization passes to perform (default: 3)
-  --disable-auto-classification  Disable automatic prompt selection based on meeting type
+Inputs:
+  - Single transcript file or directory of `.txt` files
+  - Optional human-readable meeting context via --context to guide summarization
+  - Local Ollama model pulled via `ollama pull` (e.g., llama3, mistral)
 
 Outputs:
-  - Only the final merged summary is written to `--output-dir` (default: ./summary/)
-  - Intermediate chunk summaries are kept in memory and merged; they are not written to disk
+  - Final merged summary written to --output-dir (default: ./summary/)
+  - Output formats supported: Markdown (default) or YAML
+  - Intermediate chunk summaries remain in memory and are not written to disk
 
-Prompt system:
-  - Built-in prompt variants include: overview, action_items, detailed, more_detailed, most_detailed, final_pass_detailed
-  - Classification-aware mapping chooses the best prompt variant based on detected meeting type
-  - Supports context-driven adaptation of summaries (via --context or filename fallback)
+Key Features:
+  - Automatic classification of meeting type using transcript content
+    and optional filename heuristics
+  - Multi-pass summarization pipeline with configurable depth (--max-pass)
+  - Modular prompt system for different summary styles:
+      * overview, action_items, detailed, more_detailed, most_detailed,
+        final_pass_detailed
+      * Dynamic selection of prompt based on meeting type
+      * Optional manual overrides (--first-prompt, --second-prompt, --final-prompt)
+  - Memory-first design prioritizing privacy and performance
+  - Handles long transcripts via in-memory chunking with automatic merging
+  - Emphasis on structured civic dialogue: motions, votes, decisions, speaker intent
+  - Gender-neutral and consistent summary style
 
-Notes:
-  - Designed for structured civic dialogue: councils, committees, town halls
-  - Gender-neutral output style with emphasis on motions, votes, decisions, and speaker intent
-  - Fully local-first and privacy-preserving — no cloud APIs required
+Arguments:
+  -i / --input-dir           Directory or file path of transcripts to summarize
+  --model                    Local model to use (e.g., llama3, mistral)
+  --context                  Optional human-readable meeting context
+  --output-dir               Directory to save final summary (default: ./summary/)
+  --output-format            'markdown' (default) or 'yaml'
+  --first-prompt             Optional manual prompt ID for first summarization
+                             pass (used if auto-classification is disabled)
+  --second-prompt            Optional manual prompt ID for second pass
+                             (used if auto-classification is disabled)
+  --final-prompt             Optional manual prompt ID for final pass
+                             (used if auto-classification is disabled)
+  --max-words                Approximate word count per memory chunk (default: 3500)
+  --max-pass                 Maximum summarization passes (default: 3)
+  --disable-auto-classification  Disable automatic prompt selection
 
-TODO:
-  - Optional entity normalization
-  - Community feedback integration for improved summarization accuracy
+Dependencies:
+  - Python 3.10+
+  - Ollama (local API endpoint)
+  - Locally pulled LLMs: llama3, mistral, gemma, etc.
+  - Standard libraries: os, sys, re, argparse, textwrap
+  - Optional: YAML library for output if using --output-format yaml
+
+Example Usage:
+  python yatsee_summarize_transcripts.py --model llama3 \
+      -i council_meeting_2025_06_01 \
+      --context "City Council Meeting - June 2025"
+
+  python yatsee_summarize_transcripts.py --model mistral \
+      -i firehall_meeting_2025_05 \
+      --context "Fire Hall Proposal Discussion" \
+      --output-format markdown
+
+  python yatsee_summarize_transcripts.py --model gemma:2b \
+      -i finance_committee_2025_05 \
+      --disable-auto-classification \
+      --first-prompt overview \
+      --second-prompt detailed \
+      --final-prompt final_pass_detailed
 """
 
+# Standard library
 import argparse
+import json
 import os
 import re
 import sys
-import toml
-import json
-import yaml
-import requests
 import textwrap
-from typing import List, Dict, Set, Any
+from typing import Any, Dict, List, Set
+
+# Third-party imports
+import requests
+import toml
+import yaml
 
 OLLAMA_SERVER_URL = "http://localhost:11434"
 
 
 def classify_meeting(session: requests.Session, model: str, prompt: str) -> str:
     """
-    Classifies the type of meeting (e.g., city council, finance committee) using a local LLM via a streaming API.
+    Classify the type of a meeting transcript using a local Ollama LLM.
+
+    The function sends a streaming request to the Ollama server with the provided
+    prompt and model, collects the streamed JSON responses, concatenates the text,
+    and validates the label against allowed meeting types.
 
     :param session: A preconfigured requests.Session object for efficient HTTP reuse.
     :param model: Name of the model to use (e.g., 'llama3').
-    :param prompt: A formatted prompt string with placeholders for context and text.
-    :return: A lowercase string representing the inferred meeting type, or 'general' as fallback.
-    :raises RuntimeError: If HTTP request or JSON parsing fails.
+    :param prompt: Prompt text containing context and transcript snippet.
+    :return: Lowercase meeting type label (e.g., 'city_council') or 'general' if unknown.
+    :raises RuntimeError: If HTTP request fails or JSON decoding fails.
     """
     payload = {"model": model, "prompt": prompt, "stream": True}
     try:
@@ -121,12 +140,15 @@ def classify_meeting(session: requests.Session, model: str, prompt: str) -> str:
 
 def load_global_config(path: str) -> Dict[str, Any]:
     """
-    Load the global YATSEE configuration file.
+    Load the global YATSEE configuration from a TOML file.
 
-    :param path: Path to the global TOML config file
-    :return: Parsed global configuration as a dictionary
-    :raises FileNotFoundError: If the file does not exist
-    :raises ValueError: If the TOML cannot be parsed
+    Raises an exception if the file is missing or invalid.
+    Ensures downstream code can rely on a complete global config dictionary.
+
+    :param path: Path to the global TOML configuration file
+    :return: Parsed configuration as a dictionary
+    :raises FileNotFoundError: If the config file does not exist
+    :raises ValueError: If TOML parsing fails
     """
     if not os.path.exists(path):
         raise FileNotFoundError(f"Global configuration file not found: {path}")
@@ -140,10 +162,13 @@ def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any
     """
     Load and merge entity-specific configuration with global defaults.
 
+    Handles merging of reserved keys ("settings", "meta") from local config.
+    Ensures a flattened dictionary that the pipeline can consume safely.
+
     :param global_cfg: Global configuration dictionary
-    :param entity: Entity handle to load (e.g., 'us_ca_fresno_city_council')
+    :param entity: Entity handle to load
     :return: Merged entity configuration dictionary
-    :raises KeyError: If entity is not defined in global config
+    :raises KeyError: If entity is missing from global config
     :raises FileNotFoundError: If local entity config is missing
     """
     reserved_keys = {"settings", "meta"}
@@ -177,15 +202,16 @@ def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any
 
 def discover_files(input_path: str, supported_exts, exclude_suffix: str = None) -> List[str]:
     """
-    Collect files from a directory or single file based on allowed extensions,
-    optionally excluding files with a specific suffix.
+    Discover files in a directory or single file path matching allowed extensions.
 
-    :param input_path: Path to directory or file
-    :param supported_exts: Supported file extensions (str or tuple)
-    :param exclude_suffix: Optional suffix to exclude (e.g., '.punct.txt')
-    :return: Sorted list of valid file paths
+    Optionally excludes files ending with a specified suffix.
+
+    :param input_path: Path to directory or single file
+    :param supported_exts: Allowed file extensions (e.g., '.txt' or ('.txt', '.out'))
+    :param exclude_suffix: Optional suffix to exclude from results
+    :return: Sorted list of file paths matching criteria
     :raises FileNotFoundError: If path does not exist
-    :raises ValueError: If file extension is unsupported
+    :raises ValueError: If a single file does not match supported extensions
     """
     files: List[str] = []
 
@@ -213,7 +239,14 @@ def discover_files(input_path: str, supported_exts, exclude_suffix: str = None) 
 
 def extract_context_from_filename(filename, extra_note=None):
     """
-    Extracts a human-friendly meeting context from a transcript filename.
+    Extract a human-readable context description from a transcript filename.
+
+    Parses date patterns and normalizes separators, producing strings like
+    'City Council — 2025-06-15'. Optionally appends an extra note in parentheses.
+
+    :param filename: Transcript file path
+    :param extra_note: Optional string to append for additional context
+    :return: Human-friendly context string
     """
     # Just the basename (strip path)
     base = os.path.basename(filename)
@@ -250,81 +283,51 @@ def extract_context_from_filename(filename, extra_note=None):
 
 def estimate_token_count(text: str) -> int:
     """
-    Estimate token count from a text string using an average ratio of 0.75 words per token.
+    Estimate the token count of a string for LLM usage.
+
+    Uses an average ratio of 0.75 words per token as heuristic.
 
     :param text: Input text
-    :return: Estimated token count
+    :return: Estimated token count (integer)
     """
     return int(len(text.split()) / 0.75)
 
 
 def calculate_cost_openai_gpt4o(input_tokens: int, output_tokens: int) -> float:
     """
-    Estimate the cost of using OpenAI's GPT-4o model based on input and output token usage.
+    Estimate the cost of a GPT-4o call on OpenAI based on token usage.
 
-    GPT-4o Pricing:
-      - $0.005 per 1K input tokens
-      - $0.015 per 1K output tokens
+    This is a simple helper to quickly approximate pricing for planning or
+    logging purposes. It assumes linear costs and does not account for any
+    tiered or promotional pricing.
 
-    :param input_tokens: Estimated input token count
-    :param output_tokens: Estimated output token count
-    :return: Estimated cost in USD
+    Pricing:
+      - $0.005 per 1,000 input tokens
+      - $0.015 per 1,000 output tokens
+
+    :param input_tokens: Number of tokens sent to the model (prompt)
+    :param output_tokens: Number of tokens generated by the model (completion)
+    :return: Estimated cost in USD, rounded to 4 decimal places
     """
     input_cost = input_tokens / 1000 * 0.005
     output_cost = output_tokens / 1000 * 0.015
     return round(input_cost + output_cost, 4)
 
 
-def get_files_list(path: str) -> list[str]:
-    """
-    Collect a list of .txt and .out files from a directory or single file path.
-
-    :param path: Path to .txt or .out files, or directory
-    :return: List of valid txt file paths
-    :raises FileNotFoundError: If no valid files found
-    :raises ValueError: If unsupported file extension encountered
-    """
-    valid_extensions = (".txt", ".out")
-    ignored_suffixes = (".punct.txt",)
-    txt_files = []
-
-    if os.path.isdir(path):
-        for filename in os.listdir(path):
-            full_path = os.path.join(path, filename)
-
-            # Skip ignored suffix
-            if full_path.lower().endswith(ignored_suffixes):
-                continue
-
-            if os.path.isfile(full_path) and filename.lower().endswith(valid_extensions):
-                txt_files.append(full_path)
-        if not txt_files:
-            raise FileNotFoundError(f"No valid .txt files found in directory: {path}")
-    elif os.path.isfile(path):
-        filename = os.path.basename(path)
-
-        # Explicit check for single file input
-        if filename.lower().endswith(ignored_suffixes):
-            raise ValueError(f"Input file '{filename}' is an intermediate artifact. Use the final .txt file.")
-
-        if filename.lower().endswith(valid_extensions):
-            txt_files.append(path)
-        else:
-            raise ValueError(f"Unsupported file extension: {os.path.splitext(path)[1]}")
-    else:
-        raise FileNotFoundError(f"Input path not found: {path}")
-
-    return txt_files
-
-
 def prepare_text_chunk(text: str, max_tokens: int = 2500, overlap_tokens: int | None = None) -> List[str]:
     """
-    Split text into overlapping chunks by token count using a fixed sliding window.
+    Split a large text into overlapping token-based chunks for LLM processing.
 
-    :param text: Raw text input
-    :param max_tokens: Number of tokens per chunk
-    :param overlap_tokens: Number of tokens to overlap between chunks
-    :return: List of text chunks (strings)
+    Useful when the text exceeds the model context limit. Overlapping chunks
+    preserve continuity so that summaries or embeddings capture context across
+    boundaries. Sliding window size is determined by max_tokens and optional
+    overlap.
+
+    :param text: Input text string to chunk
+    :param max_tokens: Maximum number of tokens per chunk
+    :param overlap_tokens: Number of tokens to repeat from previous chunk;
+        defaults to min(10% of max_tokens, 800)
+    :return: List of string chunks, each within token limits, preserving overlap
     """
     if overlap_tokens is None:
         overlap_tokens = min(int(max_tokens * 0.1), 800)  # max 800 tokens overlap
@@ -357,12 +360,15 @@ def prepare_text_chunk(text: str, max_tokens: int = 2500, overlap_tokens: int | 
 
 def prepare_text_chunk_sentence(text: str, max_tokens: int = 3000) -> list[str]:
     """
-    Chunk text roughly by sentences to stay within token limit.
-    If the full text fits, returns it as a single chunk.
+    Split text into sentence-aligned chunks while staying under a token limit.
 
-    :param text: The full transcript text
-    :param max_tokens: Approximate max tokens per chunk (default 3000)
-    :return: List of text chunks
+    This is preferred when semantic coherence matters — sentence boundaries
+    are respected to avoid splitting mid-thought. The function first estimates
+    token count; if text fits in one chunk, returns immediately.
+
+    :param text: Input transcript text
+    :param max_tokens: Approximate maximum tokens per chunk
+    :return: List of sentence-aligned chunks ready for model consumption
     """
     # Fast path: skip chunking if the text fits in one chunk
     if int(len(text.split()) / 0.75) <= max_tokens:
@@ -394,15 +400,18 @@ def prepare_text_chunk_sentence(text: str, max_tokens: int = 3000) -> list[str]:
 
 def summarize_transcript(session: requests.Session, model: str, prompt: str = "detailed", num_ctx: int = 8192) -> str:
     """
-    Use a local Ollama LLM to summarize transcript text.
-    Ollama returns streaming JSON objects, one per line
+    Generate a summary of a transcript using a local Ollama LLM in streaming mode.
 
-    :param session: Pass in connection session
-    :param model: Name of the model to use (e.g., 'llama3', 'mistral')
-    :param prompt: Type of prompt to use (key from PROMPTS)
-    :param num_ctx: Max context window that a model supports
-    :return: The generated summary as a string
-    :raises RuntimeError: On HTTP or JSON streaming errors
+    Uses a requests.Session to post a prompt to the model, streaming output
+    line by line. Useful for long transcripts where memory or latency matters.
+    Stops reading the stream once the 'done' flag is reached.
+
+    :param session: Active requests.Session to reuse connections efficiently
+    :param model: Name of the Ollama model to use (e.g., 'llama3')
+    :param prompt: Prompt text or template to drive summarization
+    :param num_ctx: Maximum context length the model can handle (used in options)
+    :return: Generated summary text
+    :raises RuntimeError: If the HTTP request fails or streaming JSON is malformed
     """
     # payload = {"model": model, "prompt": prompt}
     payload = {
@@ -437,13 +446,17 @@ def summarize_transcript(session: requests.Session, model: str, prompt: str = "d
 
 def write_summary_file(summary: str, basename: str, output_dir: str, fmt: str = "yaml") -> bool:
     """
-    Write the summary to the given output directory in either YAML or Markdown format.
+    Write a summary to disk in YAML or Markdown format.
 
-    :param summary: The summary string
-    :param basename: Original transcript base name (used for output filename)
-    :param output_dir: Directory to write summary file into
-    :param fmt: Output format: "markdown" (default) or "yaml"
-    :return: True if file written successfully, False otherwise
+    Provides a standard way to store processed transcript summaries, making
+    them easy to load later or present as documentation. Creates the file
+    in the specified directory and overwrites if it exists.
+
+    :param summary: The summary content to save
+    :param basename: Base filename without extension
+    :param output_dir: Directory to store the file; created if missing
+    :param fmt: 'yaml' or 'markdown' output format
+    :return: True if successfully written; False if an exception occurred
     """
     filename = f"{basename}.{'md' if fmt == 'markdown' else 'yaml'}"
     out_path = os.path.join(output_dir, filename)
@@ -467,12 +480,17 @@ def write_summary_file(summary: str, basename: str, output_dir: str, fmt: str = 
 
 def write_chunk_files(chunks: list[str], output_dir: str, meeting_type: str, base_name: str) -> bool:
     """
-    Save transcript chunks to disk under organized directory structure.
-    :param chunks: List of text chunks to write
-    :param output_dir: Base directory for output files
-    :param meeting_type: Meeting category label (e.g., 'city_council')
-    :param base_name: Base filename (without extension) for chunk files
-    :return: True if all chunks saved successfully, False otherwise
+    Save text chunks to structured directories by meeting type and base name.
+
+    Organizes chunks for indexing or embedding. Each chunk gets its own file
+    with a numbered suffix for ordering. Automatically creates necessary
+    directories if missing.
+
+    :param chunks: List of chunk strings to write
+    :param output_dir: Root directory for all chunk output
+    :param meeting_type: Subdirectory label, e.g., 'city_council'
+    :param base_name: Base filename prefix for all chunk files
+    :return: True if all chunks are successfully written, False otherwise
     """
     try:
         chunks_path = os.path.join(output_dir, "chunks", meeting_type, base_name)
@@ -491,10 +509,14 @@ def write_chunk_files(chunks: list[str], output_dir: str, meeting_type: str, bas
 
 def generate_known_speakers_context(speaker_matches: dict) -> List[str] | str:
     """
-    Generate a short markdown-friendly context note from speaker match data.
+    Generate a human-readable summary of known speakers in a transcript chunk.
 
-    :param speaker_matches: Dict mapping canonical person ID to set of matching name variants
-    :return: A string with a sentence noting detected speaker mentions in this chunk
+    Useful for adding context to chunks before indexing or summarizing.
+    Highlights canonical names detected and mentions when multiple name
+    variants are present.
+
+    :param speaker_matches: Mapping of canonical speaker ID to set of matched names
+    :return: Markdown-friendly string describing detected speakers, or empty string
     """
     if not speaker_matches:
         return ""
@@ -526,11 +548,18 @@ def generate_known_speakers_context(speaker_matches: dict) -> List[str] | str:
 
 def scan_transcript_for_names(transcript_text: str, name_permutations: Dict[str, List[str]]) -> Dict[str, Set[str]]:
     """
-    Scan a transcript and return all matched name/title variants from the known list of permutations.
+    Identify mentions of known individuals in a transcript using name and title variants.
 
-    :param transcript_text: Raw string of the transcript text
-    :param name_permutations: Dictionary mapping person keys (e.g., 'Rachel_Simmons') to list of known name/title permutations
-    :return: Dictionary mapping matched person keys to the set of matched strings found in the transcript
+    This function searches the transcript for any variant of a canonical
+    name (including titles, abbreviations, and alternative spellings) and
+    returns all matches. Word boundaries are respected to avoid false
+    positives (e.g., "Rob" won't match inside "Robotics"). Useful for
+    tagging speakers or preparing context for summaries and embeddings.
+
+    :param transcript_text: Raw transcript text to scan
+    :param name_permutations: Dictionary mapping canonical person keys to lists
+        of known name/title variants
+    :return: Dictionary mapping canonical names to sets of matched strings
     """
     found_matches = {}
 
@@ -554,11 +583,22 @@ def scan_transcript_for_names(transcript_text: str, name_permutations: Dict[str,
 
 def build_name_permutations(data_config: dict) -> dict:
     """
-    Generate all possible name and title permutations for known individuals in a city council config.
+    Generate comprehensive name and title permutations for known individuals.
 
-    :param data_config: Subsection of a parsed TOML config under a specific entity (e.g., city_council)
-    :return: Dictionary mapping person identifiers (e.g., 'Rachel_Sampson') to a sorted list of name/title variants
-    :raises KeyError: If required keys like 'people' or 'titles' are missing in the config
+    This prepares a lookup table for transcript scanning, expanding each
+    canonical person's aliases to include:
+      - First name, last name, full name
+      - Known aliases from configuration
+      - Titles combined with last or full names
+      - Rephrased multi-word title variants (e.g., "Information Technology Director")
+
+    The resulting dictionary can then be used to detect all possible references
+    to a person across transcripts, improving speaker matching and context generation.
+
+    :param data_config: Dictionary containing 'people' (canonical names -> aliases)
+        and 'titles' (role -> list of titles)
+    :return: Dictionary mapping canonical person keys to sorted list of name/title variants
+    :raises KeyError: If 'people' or 'titles' keys are missing from data_config
     """
     people_by_role = data_config.get("people", {})
     titles_by_role = data_config.get("titles", {})
@@ -631,58 +671,43 @@ def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
-        Summarize city council, committee, or other civic meeting transcripts using a local Ollama language model.
-        
-        This tool reads transcript files (either a single file or an entire directory), auto-classifies the meeting 
-        type (e.g., city_council, finance_committee), and summarizes using a multi-pass pipeline with structured prompts.
-        Chunking is handled in memory; intermediate chunks are not written to disk.
-        
+        Requirements:
+          - Python 3.10+
+          - Ollama CLI installed and models pulled locally
+          - Input transcripts must be .txt or .out files
+
         Features:
-          - Automatic classification of meeting type using transcript context + fallback filename heuristics
-          - Dynamic prompt selection per meeting type (e.g., final_pass_detailed for council, financial_summary for finance)
-          - Manual override of prompt type(s) for custom workflows
-          - Recursive summarization of long transcripts via intelligent in-memory chunking and reprocessing
-          - Multi-pass refinement up to a configurable depth (default: 3)
-          - Optional disabling of auto classification with `--disable-auto-classification`
-          - Output in either YAML or Markdown format
-          - Token usage tracking with cost estimation (for reference if used with paid APIs in future)
+          - Automatic classification of meeting type (city_council, finance_committee, etc.)
+          - Dynamic prompt selection per meeting type
+          - Manual prompt override for custom workflows
+          - Recursive multi-pass summarization for long transcripts (default: 3 passes)
+          - Optional disabling of auto-classification
+          - Output in YAML or Markdown
+          - Fully local and privacy-respecting
 
         Example usage:
           python yatsee_summarize_transcripts.py -e defined_entity
           python yatsee_summarize_transcripts.py --model llama3:latest -i normalized/ --context "City Council - June 2025"
           python yatsee_summarize_transcripts.py -m mistral:latest -i transcripts/ -o summaries/ --output-format markdown
-          python yatsee_summarize_transcripts.py -m gemma:2b -i finance/ --disable-auto-classification --prompt detailed
-        
-        Input:
-          - Single file or directory of `.txt` files
-          - Context string (optional) used to enhance prompt relevance
-          - Models must be locally pulled via `ollama pull` (e.g., `llama3`, `mistral`)
-        
-        Output:
-          - Final combined summary saved as `_final_summary.md` or `.yaml` in the output directory
-          - Intermediate chunks are processed in memory only and merged automatically
-          - Written to output directory (`--output-dir`, default: ./summary)
-        
-        This tool is privacy-respecting, fully local, and optimized for transparency, civic clarity, and reproducibility.
-        """)
-    )
-
+          python yatsee_summarize_transcripts.py -m gemma:2b -i finance/ --disable-auto-classification --first-prompt detailed
+    """)
+)
     parser.add_argument("-e", "--entity", help="Entity handle to process")
     parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to global yatsee.toml")
     parser.add_argument("-i", "--txt-input", help="Path to a transcript file or directory (supports .txt or .out)")
     parser.add_argument("-o", "--output-dir", help="Directory to save the summary output (Default: summary)")
-    parser.add_argument("-m", "--model", help="Model name (e.g. 'llama3:latest', 'mistral:latest', 'mistral-nemo:latest', gemma:2b)")
+    parser.add_argument("-m", "--model", help="Local Ollama model name (e.g. 'llama3:latest', 'mistral:latest', 'mistral-nemo:latest', gemma:2b)")
     parser.add_argument("-f", "--output-format", choices=["markdown", "yaml"], default="markdown", help="Summary output format (Default: markdown)")
-    parser.add_argument("-j", "--job-type", choices=["summary", "research"], default="summary", help="Job type to define prompts(Default: summary)")
-    parser.add_argument("-w", "--max-words", type=int, help="Word count above which transcript is chunked (Default: 3500)")
+    parser.add_argument("-j", "--job-type", choices=["summary", "research"], default="summary", help="Define job type to select prompt workflow (default: summary)")
+    parser.add_argument("-w", "--max-words", type=int, help="Word count threshold for chunking transcript (default: 3500)")
     parser.add_argument("-t", "--max-tokens", type=int, help="Approximate max tokens per chunk (Default: 2500)")
-    parser.add_argument("-p", "--max-pass", type=int, default=3, help="Max number of iterations for multi-pass refinement (Default: 3)")
-    parser.add_argument("-d", "--disable-auto-classification", action="store_true", help="Disable auto classification. Make sure to set first and second pass prompts")
-    parser.add_argument("--first-prompt", help="Prompt type to use for summarization (Only used when auto classification is disabled)")
-    parser.add_argument("--second-prompt", help="Prompt type for second pass summarization of chunk summaries (Only used when auto classification is disabled)")
-    parser.add_argument("--final-prompt", help="Prompt type for final pass summarization of chunk summaries (Only used when auto classification is disabled)")
-    parser.add_argument("--context", default="", help="Optional meeting context to guide summarization")
-    parser.add_argument("--print-prompts", action="store_true", help="Print all prompt templates and exit")
+    parser.add_argument("-p", "--max-pass", type=int, default=3, help="Max iterations for multi-pass summarization (default: 3)")
+    parser.add_argument("-d", "--disable-auto-classification", action="store_true", help="Disable automatic meeting type classification. Requires manual prompt overrides")
+    parser.add_argument("--first-prompt", help="Prompt type for first pass (only used when auto-classification is disabled)")
+    parser.add_argument("--second-prompt", help="Prompt type for second pass of chunk summaries (only used when auto-classification is disabled)")
+    parser.add_argument("--final-prompt", help="Prompt type for final pass summarization (only used when auto-classification is disabled)")
+    parser.add_argument("--context", default="", help="Optional context string to guide summarization (e.g., 'City Council - June 2025')")
+    parser.add_argument("--print-prompts", action="store_true", help="Print all prompt templates for job type and exit")
     args = parser.parse_args()
 
     # Determine input/output paths

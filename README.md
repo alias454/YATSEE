@@ -18,6 +18,18 @@ YATSEE solves that by using a carefully tuned local LLM to transform that wall o
 
 ---
 
+## Documentation
+
+All modules are fully documented using standard Python docstrings.
+
+To browse documentation locally:
+
+```bash
+pydoc ./yatsee_summarize_transcripts.py
+```
+
+---
+
 ## 🚀 Quick Start (Plug-and-Play)
 
 Follow these steps to get YATSEE running.

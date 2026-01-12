@@ -1,25 +1,38 @@
-#!/usr/bin/env python3
 """
-YATSEE Entity Config Scaffold Generator
+YATSEE Entity Configuration Scaffold Generator
 
-Generates per-entity directories and config.toml files from the global
-yatsee.toml registry.
+This tool reads the global YATSEE registry (yatsee.toml) and materializes
+per-entity directory structures and config.toml files.
 
-Design Principles:
-- Preserves comments and structure for downstream scripts.
-- Does not print or write unless --create is used.
-- Safe, sparse, and intentionally structured scaffolds.
-- Supports overrides via local config without enforcing them.
+What it does:
+- Creates one directory per registered entity under the root data path
+- Generates a minimally populated, comment-rich config.toml for each entity
+- Preserves structure, ordering, and explanatory comments using tomlkit
+- Differentiates civic entities (e.g. city councils) from media/online entities
+- Produces safe, non-destructive scaffolds intended for manual refinement
+
+What it deliberately does NOT do:
+- Does not overwrite existing config.toml files
+- Does not enforce required fields or validation
+- Does not infer people, titles, or divisions automatically
+- Does not modify the global registry
+
+Default behavior is read-only. No files or directories are created unless
+--create is explicitly provided.
+
+This script exists to make entity setup boring, predictable, and reversible.
 """
 
+# Standard library
 import argparse
 import os
 import sys
 from typing import Any, Dict, List, Tuple
 
+# Third-party imports
 import toml
 import tomlkit
-from tomlkit import document, table, comment, nl
+from tomlkit import comment, document, nl, table
 
 GLOBAL_CONFIG_PATH = "yatsee.toml"
 
@@ -205,22 +218,14 @@ def build_entity_structure(global_config: Dict[str, Any]) -> List[str]:
 
 
 def main() -> int:
-    """
-    CLI entry point.
-
-    Supports --create to actually generate directories/configs.
-    If not provided, lists registered entities.
-
-    :return: Exit code
-    """
     parser = argparse.ArgumentParser(
-        description="YATSEE entity registry and config scaffold tool"
+        description=(
+            "Generate per-entity directory structures and config.toml scaffolds "
+            "from the global YATSEE registry (yatsee.toml). By default, runs in "
+            "read-only mode and lists registered entities."
+        )
     )
-    parser.add_argument(
-        "--create",
-        action="store_true",
-        help="Create entity directories and scaffold config.toml files",
-    )
+    parser.add_argument("--create", action="store_true", help="Create entity directories and scaffold config.toml files")
     args = parser.parse_args()
 
     try:

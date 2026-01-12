@@ -25,29 +25,39 @@ Design Notes:
   - Supports optional date filtering and dry-run mode
   - Modular functions for config loading, YouTube resolution, and download execution
   - Outputs audio ready for Layer 2 transcription and punctuation polishing
+
+Idempotency:
+  - Tracker file '.downloaded' ensures files aren't re-downloaded
+  - Playlist cache '.playlist_ids.json' prevents repeated YouTube queries
 """
 
+# Standard library
 import argparse
 import os
-import sys
-import re
 import random
+import re
+import sys
+import textwrap
 import time
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 
-import toml
+# Third-party imports
 import json
+import toml
 from yt_dlp import YoutubeDL
 
 
 def load_global_config(path: str) -> Dict[str, Any]:
     """
-    Load global YATSEE TOML configuration.
+    Load the global YATSEE configuration from a TOML file.
 
-    :param path: Path to global TOML config
-    :return: Parsed global configuration dictionary
-    :raises FileNotFoundError: If file is missing
+    Raises an exception if the file is missing or invalid.
+    Ensures downstream code can rely on a complete global config dictionary.
+
+    :param path: Path to the global TOML configuration file
+    :return: Parsed configuration as a dictionary
+    :raises FileNotFoundError: If the config file does not exist
     :raises ValueError: If TOML parsing fails
     """
     if not os.path.exists(path):
@@ -60,7 +70,10 @@ def load_global_config(path: str) -> Dict[str, Any]:
 
 def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any]:
     """
-    Load entity-specific config and merge with global defaults.
+    Load and merge entity-specific configuration with global defaults.
+
+    Handles merging of reserved keys ("settings", "meta") from local config.
+    Ensures a flattened dictionary that the pipeline can consume safely.
 
     :param global_cfg: Global configuration dictionary
     :param entity: Entity handle to load
@@ -93,23 +106,17 @@ def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any
 
 def clean_downloaded_file(video_id: str, output_dir: str) -> str:
     """
-    Locate a downloaded file by video_id, normalize its filename, and rename it safely.
+    Normalize and safely rename a downloaded audio file.
 
-    This function ensures filesystem hygiene and prevents collisions:
-    - Scans the output directory efficiently using os.scandir
-    - Sanitizes filenames to lowercase alphanumerics with safe separators
-    - Resolves filename collisions by appending a numeric suffix
-    - Avoids overwriting existing files and handles missing files gracefully
-    - Returns the cleaned filename for downstream processing
+    - Sanitizes filenames to lowercase alphanumeric with safe separators
+    - Avoids overwriting existing files
+    - Resolves collisions with numeric suffixes
 
-    Design Constraints:
-    - Only the base filename is sanitized; directory paths are preserved
-    - Side effects are limited to renaming files
-    - Returns an empty string if no matching file is found or on failure
+    Returns empty string if no matching file is found.
 
     :param video_id: Prefix of the downloaded file to locate
     :param output_dir: Directory where downloaded files reside
-    :return: Sanitized filename that exists in output_dir, or "" if not found
+    :return: Sanitized filename in output_dir, or "" if not found
     """
     try:
         # Scan directory for first file starting with video_id
@@ -158,11 +165,13 @@ def clean_downloaded_file(video_id: str, output_dir: str) -> str:
 
 def load_cached_playlist(path: str, max_age_seconds: int) -> list[str] | None:
     """
-    Load a cached playlist JSON file if it exists and is not too old.
+    Load a playlist cache file if it exists and is recent enough.
+
+    Returns None if cache is missing, corrupted, or too old.
 
     :param path: Path to the cache file
-    :param max_age_seconds: Maximum allowed age of cache in seconds
-    :return: List of video IDs if cache is valid, else None
+    :param max_age_seconds: Maximum allowed age of cache
+    :return: List of video IDs if valid, else None
     """
     if not os.path.exists(path):
         return None
@@ -190,9 +199,11 @@ def load_cached_playlist(path: str, max_age_seconds: int) -> list[str] | None:
 
 def save_cached_playlist(path: str, channel: str, video_ids: list[str]) -> None:
     """
-    Save a playlist to a cache file with current timestamp.
+    Save a list of video IDs to a cache file with a timestamp.
 
-    :param path: Path to write the cache
+    Ensures parent directories exist before writing.
+
+    :param path: Path to the cache file
     :param channel: YouTube channel slug
     :param video_ids: List of video IDs to store
     """
@@ -212,9 +223,11 @@ def save_cached_playlist(path: str, channel: str, video_ids: list[str]) -> None:
 
 def get_video_ids(youtube_path: str) -> List[str]:
     """
-    Resolve video IDs from a channel or playlist in flat-playlist mode.
+    Extract video IDs from a YouTube channel or playlist in flat mode.
 
-    :param youtube_path: YouTube channel or playlist path
+    Uses yt-dlp extract_flat to avoid downloading content.
+
+    :param youtube_path: Channel or playlist path (e.g., @handle/streams)
     :return: List of video IDs
     """
     url = f"https://www.youtube.com/{youtube_path.lstrip('/')}"
@@ -230,7 +243,9 @@ def get_video_ids(youtube_path: str) -> List[str]:
 
 def get_video_upload_date(video_id: str) -> Optional[str]:
     """
-    Return video upload date in YYYYMMDD.
+    Get the upload date of a YouTube video in YYYYMMDD format.
+
+    Returns None if the date cannot be determined.
 
     :param video_id: YouTube video ID
     :return: Upload date string or None
@@ -253,10 +268,13 @@ def get_video_upload_date(video_id: str) -> Optional[str]:
 
 def get_tracked_ids(tracker_file: str, dry_run: bool = False) -> set[str]:
     """
-    Load previously processed video IDs from the tracker file.
+    Load previously processed video IDs from tracker file.
+
+    Ensures idempotent downloads by skipping already downloaded videos.
+    Creates the tracker file if missing and not in dry-run mode.
 
     :param tracker_file: Path to the .downloaded tracker file
-    :param dry_run: If True, do not create the file if missing
+    :param dry_run: Do not create tracker file if True
     :return: Set of tracked video IDs
     """
     tracked_ids = set()
@@ -285,15 +303,16 @@ def download_audio(video_id: str, output_dir: str, dry_run: bool = False,) -> Di
     - Returns structured status instead of printing
     - Raises exceptions for the caller to handle
 
+    # :param max_retries: Total retry attempts for failed downloads
+    # :param fragment_retries: Retry attempts per media fragment
+    # :param concurrent_fragments: Number of fragments downloaded in parallel
+    # :param min_sleep: Minimum sleep interval between requests (seconds)
+    # :param max_sleep: Maximum sleep interval between requests (seconds)
+    # :param throttled_rate: Bandwidth throttle rate (e.g. "500K")
+    # :param user_agent: Explicit user-agent string to send with requests
+
     :param video_id: YouTube video ID to download
     :param output_dir: Directory where audio files will be written
-    :param max_retries: Total retry attempts for failed downloads
-    :param fragment_retries: Retry attempts per media fragment
-    :param concurrent_fragments: Number of fragments downloaded in parallel
-    :param min_sleep: Minimum sleep interval between requests (seconds)
-    :param max_sleep: Maximum sleep interval between requests (seconds)
-    :param throttled_rate: Bandwidth throttle rate (e.g. "500K")
-    :param user_agent: Explicit user-agent string to send with requests
     :param dry_run: If True, resolves configuration but performs no download
     :return: Dictionary describing the download result
     :raises RuntimeError: If the download fails
@@ -372,7 +391,9 @@ def download_audio(video_id: str, output_dir: str, dry_run: bool = False,) -> Di
 
 def off_peak_warning():
     """
-    Print a warning if current hour is outside typical off-peak range (1am-6am local).
+    Print a warning if current local hour is outside off-peak (1am-6am).
+
+    Helps avoid heavy network usage during peak hours.
     """
     current_hour = datetime.now().hour
     if not (1 <= current_hour <= 6):
@@ -383,12 +404,24 @@ def off_peak_warning():
 # CLI Entry Point
 # ----------------------------------------------------------------------
 def main() -> int:
-    """
-    CLI entry point: parses arguments, loads configs, runs pipeline.
+    parser = argparse.ArgumentParser(
+        description="Download YouTube audio for YATSEE processing.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+            Requirements:
+              - Python 3.10+
+              - yt-dlp installed and available in PATH
+              - ffmpeg installed for audio extraction
+              - Output format: MP3
 
-    :return: 0 on success, 1 on failure
-    """
-    parser = argparse.ArgumentParser(description="YATSEE YouTube audio downloader")
+            Usage Examples:
+              python yatsee_download_youtube.py -e defined_entity
+              python yatsee_download_youtube.py --youtube-path @channel/streams --output-dir ./audio
+              python yatsee_download_youtube.py -e defined_entity --date-after 20260101
+              python yatsee_download_youtube.py --dry-run
+              python yatsee_download_youtube.py -e defined_entity --make-playlist
+        """)
+    )
     parser.add_argument("-e", "--entity", required=True, help="Entity handle")
     parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to global config")
     parser.add_argument("-o", "--output-dir", help="Output directory for MP3 audio")
@@ -397,7 +430,6 @@ def main() -> int:
     parser.add_argument("--date-before", default="", help="Only include videos before YYYYMMDD (e.g. 20251231)")
     parser.add_argument("--dry-run", action="store_true", help="Resolve URLs without downloading")
     parser.add_argument("--make-playlist", action="store_true", help="Create a playlist cache file and exit")
-
     args = parser.parse_args()
 
     # Determine input/output paths
