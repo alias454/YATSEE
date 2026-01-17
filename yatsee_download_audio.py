@@ -241,12 +241,13 @@ def get_video_ids(youtube_path: str) -> List[str]:
         return [e["id"] for e in info.get("entries", []) if e and "id" in e]
 
 
-def get_video_upload_date(video_id: str) -> Optional[str]:
+def get_video_upload_date(video_id: str, js_runtime: str = "deno") -> Optional[str]:
     """
     Get the upload date of a YouTube video in YYYYMMDD format.
 
     Returns None if the date cannot be determined.
 
+    :param js_runtime: Use specific app for JS challenges
     :param video_id: YouTube video ID
     :return: Upload date string or None
     """
@@ -254,7 +255,7 @@ def get_video_upload_date(video_id: str) -> Optional[str]:
     opts = {
         "no_warnings": True,
         "js_runtimes": {
-            "node": {}
+            js_runtime: {}
         },
     }
 
@@ -290,7 +291,7 @@ def get_tracked_ids(tracker_file: str, dry_run: bool = False) -> set[str]:
     return tracked_ids
 
 
-def download_audio(video_id: str, output_dir: str, dry_run: bool = False,) -> Dict[str, Any]:
+def download_audio(video_id: str, output_dir: str, js_runtime: str = "deno", dry_run: bool = False) -> Dict[str, Any]:
     """
     Download a single YouTube video's audio using yt-dlp with behavior identical
     to the reference shell script invocation.
@@ -313,11 +314,12 @@ def download_audio(video_id: str, output_dir: str, dry_run: bool = False,) -> Di
 
     :param video_id: YouTube video ID to download
     :param output_dir: Directory where audio files will be written
+    :param js_runtime: Use specific app for JS challenges
     :param dry_run: If True, resolves configuration but performs no download
     :return: Dictionary describing the download result
     :raises RuntimeError: If the download fails
     """
-    # throtling and retry logic
+    # Throttling and retry logic
     min_sleep = 3  # Wait at least 3 seconds between downloads.
     max_sleep = 7  # Adds jitter — randomizes the wait time between 3 and 7 seconds to mimic human behavior.
     max_retries = 3  # Limits total retries for a failed download to 3 attempts.
@@ -350,7 +352,7 @@ def download_audio(video_id: str, output_dir: str, dry_run: bool = False,) -> Di
 
         # Critical parity flags
         "js_runtimes": {
-            "node": {}
+            js_runtime: {}
         },
         "user_agent": user_agent,
 
@@ -425,6 +427,7 @@ def main() -> int:
     parser.add_argument("-e", "--entity", required=True, help="Entity handle")
     parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to global config")
     parser.add_argument("-o", "--output-dir", help="Output directory for MP3 audio")
+    parser.add_argument("--js-runtime", choices=["deno", "node", "quickjs", "quickjs-ng", "bun"], help="Specify the JS runtime for yt-dlp (default: deno)")
     parser.add_argument("--youtube-path", help="YouTube channel/playlist path (e.g. @handle/streams)")
     parser.add_argument("--date-after", default="", help="Only include videos after YYYYMMDD (e.g. 20250601)")
     parser.add_argument("--date-before", default="", help="Only include videos before YYYYMMDD (e.g. 20251231)")
@@ -463,9 +466,16 @@ def main() -> int:
         print(f"✓ Output directory will be created: {output_dir}", file=sys.stderr)
         os.makedirs(output_dir, exist_ok=True)
 
-    # Read existing trancker file for idempotent file management
+    # Read existing tracker file for idempotent file management
     tracker_file = os.path.join(output_dir, ".downloaded")
     tracked_ids = get_tracked_ids(tracker_file, dry_run=args.dry_run)
+
+    # Pick a JS runtime https://github.com/yt-dlp/yt-dlp/issues/15012
+    js_runtime = (
+            args.js_runtime
+            or entity_cfg.get("js_runtime")
+            or global_cfg.get("system", {}).get("default_js_runtime", "deno")
+    )
 
     # YouTube Path
     youtube_source = args.youtube_path or entity_cfg.get("sources", {}).get("youtube")
@@ -513,7 +523,7 @@ def main() -> int:
             print(f"✓ Skipping {video_id} (already processed)")
             continue
 
-        upload_date = get_video_upload_date(video_id)
+        upload_date = get_video_upload_date(video_id, js_runtime=js_runtime)
         if not upload_date:
             print(f"⚠️ Skipping {video_id} (no upload date)")
             continue
@@ -527,7 +537,7 @@ def main() -> int:
             break
 
         # We made it here so we can download the audio
-        result = download_audio(video_id, output_dir, dry_run=args.dry_run)
+        result = download_audio(video_id, output_dir, js_runtime=js_runtime, dry_run=args.dry_run)
         if result.get("status") == "downloaded":
             cleaned_file = clean_downloaded_file(video_id, output_dir)
             if cleaned_file:
