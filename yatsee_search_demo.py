@@ -79,7 +79,6 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
 # ============================================================================
 # CONFIG LOADING
 # ============================================================================
@@ -180,10 +179,7 @@ MODEL_NAME = (
     or "BAAI/bge-small-en-v1.5"
 )
 
-SUMMARY_DIR = os.path.join(
-    data_path,
-    global_cfg["models"][entity_cfg["summarization_model"]]["append_dir"],
-)
+SUMMARY_DIR = os.path.join(data_path, global_cfg["models"][entity_cfg["summarization_model"]]["append_dir"])
 TRANSCRIPT_DIR = os.path.join(data_path, "normalized")
 DOWNLOAD_TRACKER = os.path.join(data_path, "downloads", ".downloaded")
 
@@ -661,7 +657,7 @@ with st.sidebar:
     st.session_state.setdefault("current_entity", entity)
 
     # --- Summaries ---
-    summary_paths = sorted(glob(os.path.join(SUMMARY_DIR, "*_final_summary.summary.md")))
+    summary_paths = sorted(glob(os.path.join(SUMMARY_DIR, "*.summary.md")))
     summaries = []
     for path in summary_paths:
         label, date_str = extract_context_from_filename(path)
@@ -683,6 +679,7 @@ with st.sidebar:
     if selected_label != st.session_state.selected_summary:
         st.session_state.selected_summary = selected_label
         st.session_state.viewing_transcript = None
+        st.session_state.search_results = []  # Clear search results
         st.rerun()
 
     # --- Flexible spacer ---
@@ -749,9 +746,7 @@ if st.session_state.viewing_transcript:
 # ==========================================
 elif st.session_state.selected_summary != "-- Select Meeting --":
     selected = next(
-        (s for s in summaries if s["label"] == st.session_state.selected_summary),
-        None,
-    )
+        (s for s in summaries if s["label"] == st.session_state.selected_summary), None)
 
     if selected:
         content = load_text_file(selected["path"])
@@ -770,9 +765,7 @@ elif st.session_state.selected_summary != "-- Select Meeting --":
                 st.link_button("📺 View Video", video_url)
 
         with c4:
-            transcript_filename = selected["filename"].replace(
-                "_final_summary.summary.md", ".txt"
-            )
+            transcript_filename = selected["filename"].replace(".summary.md", ".txt")
             transcript_path = os.path.join(TRANSCRIPT_DIR, transcript_filename)
             if os.path.exists(transcript_path):
                 if st.button("📄 Transcript", type="primary"):
@@ -819,74 +812,50 @@ else:
             f"for '{st.session_state.last_query}'"
         )
 
-        for i, result in enumerate(st.session_state.search_results):
-            meta = result["meta"]
-            snippet = result["snippet"]
+for i, result in enumerate(st.session_state.search_results):
+    meta = result["meta"]
+    snippet = result["snippet"]
 
-            pretty_heading, date = extract_context_from_filename(meta["source"])
-            is_summary = meta.get("category") == "summary"
-            type_label = "📝 [SUMMARY]" if is_summary else "📄 [TRANSCRIPT]"
-            confidence = "High" if i < 3 else "Medium"
+    pretty_heading, date = extract_context_from_filename(meta["source"])
+    is_summary = meta.get("category") == "summary"
+    type_label = "📝 [SUMMARY]" if is_summary else "📄 [TRANSCRIPT]"
+    confidence = "High" if i < 3 else "Medium"
 
-            with st.expander(f"{type_label} {pretty_heading}"):
-                c1, c2 = st.columns([3, 1])
-                with c1:
-                    st.markdown(
-                        f"...{snippet}...",
-                        unsafe_allow_html=True,
-                    )
-                with c2:
-                    st.caption(f"**Date:** {date}")
-                    st.caption(f"**Relevance:** {confidence}")
+    with st.expander(f"{type_label} {pretty_heading}"):
+        # --- Snippet & meta ---
+        c_snip, c_info = st.columns([3, 1])
+        with c_snip:
+            st.markdown(f"...{snippet}...", unsafe_allow_html=True)
+        with c_info:
+            st.caption(f"**Date:** {date}")
+            st.caption(f"**Relevance:** {confidence}")
+            if meta.get("chunk_index") is not None:
+                st.caption(f"**Chunk:** {meta['chunk_index']}")
+            elif not is_summary:
+                st.caption("**Match:** Literal Text")
 
-                    if meta.get("chunk_index") is not None:
-                        st.caption(f"**Chunk:** {meta['chunk_index']}")
-                    elif not is_summary:
-                        st.caption("**Match:** Literal Text")
+        st.markdown("---")
 
-                st.markdown("---")
-                cols = st.columns(4)
+        # --- Action Buttons ---
+        btn_cols = st.columns(4)
 
-                video_url = get_video_url(meta["source"])
-                if video_url:
-                    cols[3].link_button("📺 Video", video_url)
+        # Video button (if available)
+        video_url = get_video_url(meta["source"])
+        if video_url:
+            btn_cols[3].link_button("📺 Video", video_url)
 
-                if is_summary:
-                    matching = next(
-                        (s for s in summaries if s["filename"] == meta["source"]),
-                        None,
-                    )
-                    if matching and cols[0].button(
-                        "Read Summary",
-                        key=f"btn_sum_{i}",
-                    ):
-                        st.session_state.selected_summary = matching["label"]
-                        st.rerun()
+        # Determine the summary file corresponding to this snippet
+        summary_filename = meta["source"].replace(".txt", ".summary.md") if not is_summary else meta["source"]
+        matching_summary = next((s for s in summaries if s["filename"] == summary_filename), None)
+        if matching_summary and btn_cols[0].button("Read Summary", key=f"btn_sum_{i}"):
+            st.session_state.selected_summary = matching_summary["label"]
+            st.session_state.search_results = []  # clear search results
+            st.rerun()
 
-                else:
-                    corresponding_summary = meta["source"].replace(
-                        ".txt", "_final_summary.summary.md"
-                    )
-                    matching = next(
-                        (s for s in summaries if s["filename"] == corresponding_summary),
-                        None,
-                    )
-
-                    if matching and cols[0].button(
-                        "View Summary",
-                        key=f"btn_trans_sum_{i}",
-                    ):
-                        st.session_state.selected_summary = matching["label"]
-                        st.rerun()
-
-                    transcript_path = os.path.join(
-                        TRANSCRIPT_DIR,
-                        meta["source"],
-                    )
-                    if os.path.exists(transcript_path) and cols[1].button(
-                        "View Transcript",
-                        key=f"btn_trans_raw_{i}",
-                    ):
-                        st.session_state.viewing_transcript = transcript_path
-                        st.rerun()
-
+        # Determine the transcript file corresponding to this snippet
+        transcript_filename = meta["source"].replace(".summary.md", ".txt") if is_summary else meta["source"]
+        transcript_path = os.path.join(TRANSCRIPT_DIR, transcript_filename)
+        if os.path.exists(transcript_path) and btn_cols[1].button("View Transcript", key=f"btn_trans_{i}"):
+            st.session_state.viewing_transcript = transcript_path
+            st.session_state.search_results = []  # clear search results
+            st.rerun()

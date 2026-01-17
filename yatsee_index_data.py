@@ -306,7 +306,7 @@ def main() -> int:
     collection = client.get_or_create_collection(name="council_knowledge", metadata={"hnsw:space": "cosine"})
 
     # Ingest summaries
-    summary_files = glob(os.path.join(summary_dir, "*_final_summary.summary.md"))
+    summary_files = glob(os.path.join(summary_dir, "*.summary.md"))
     print(f"📚 Indexing {len(summary_files)} summaries")
 
     num_summaries = index_documents(
