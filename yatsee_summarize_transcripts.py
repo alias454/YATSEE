@@ -444,67 +444,60 @@ def summarize_transcript(session: requests.Session, model: str, prompt: str = "d
         raise RuntimeError(f"Error during Ollama request: {e}")
 
 
-def write_summary_file(summary: str, basename: str, output_dir: str, fmt: str = "yaml") -> bool:
+def write_summary_file(summary: str, basename: str, output_dir: str, fmt: str = "yaml") -> str:
     """
     Write a summary to disk in YAML or Markdown format.
 
-    Provides a standard way to store processed transcript summaries, making
-    them easy to load later or present as documentation. Creates the file
-    in the specified directory and overwrites if it exists.
+    Creates directories if missing. Returns the full path to the written file.
 
     :param summary: The summary content to save
     :param basename: Base filename without extension
-    :param output_dir: Directory to store the file; created if missing
-    :param fmt: 'yaml' or 'markdown' output format
-    :return: True if successfully written; False if an exception occurred
+    :param output_dir: Directory to store the file
+    :param fmt: 'yaml' or 'markdown'
+    :return: Full path of the written file
+    :raises OSError, IOError: If the file cannot be written
     """
     filename = f"{basename}.{'md' if fmt == 'markdown' else 'yaml'}"
     out_path = os.path.join(output_dir, filename)
 
-    try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            if fmt == "markdown":
-                f.write(f"# Summary: {basename}\n\n{summary.strip()}\n")
-            else:  # YAML
-                yaml.safe_dump({"summary": summary}, f, sort_keys=False)
+    os.makedirs(output_dir, exist_ok=True)
 
-        return True
+    with open(out_path, "w", encoding="utf-8") as f:
+        if fmt == "markdown":
+            f.write(f"# Summary: {basename}\n\n{summary.strip()}\n")
+        else:
+            yaml.safe_dump({"summary": summary}, f, sort_keys=False)
 
-    except (OSError, IOError) as e:
-        print(f"❌ Failed to write summary file: {e}")
-    except Exception as e:
-        print(f"❌ Unexpected error during write: {e}")
-
-    return False
+    return out_path
 
 
-def write_chunk_files(chunks: list[str], output_dir: str, meeting_type: str, base_name: str) -> bool:
+def write_chunk_files(chunks: List[str], output_dir: str, meeting_type: str, base_name: str) -> List[str]:
     """
     Save text chunks to structured directories by meeting type and base name.
 
-    Organizes chunks for indexing or embedding. Each chunk gets its own file
-    with a numbered suffix for ordering. Automatically creates necessary
-    directories if missing.
+    Each chunk gets its own file with a numbered suffix to preserve order.
+    Directory is automatically created if it does not exist. Returns a list
+    of all written file paths.
 
-    :param chunks: List of chunk strings to write
-    :param output_dir: Root directory for all chunk output
+    :param chunks: List of text chunks to save
+    :param output_dir: Root directory for chunk storage
     :param meeting_type: Subdirectory label, e.g., 'city_council'
     :param base_name: Base filename prefix for all chunk files
-    :return: True if all chunks are successfully written, False otherwise
+    :return: List of full paths of all chunk files
+    :raises OSError, IOError: If any chunk file cannot be written
     """
-    try:
-        chunks_path = os.path.join(output_dir, "chunks", meeting_type, base_name)
-        os.makedirs(chunks_path, exist_ok=True)
+    chunks_path = os.path.join(output_dir, "chunks", meeting_type, base_name)
+    os.makedirs(chunks_path, exist_ok=True)
 
-        for idx, chunk_text in enumerate(chunks):
-            chunk_filename = f"{base_name}_part{idx:02d}.txt"
-            chunk_path = os.path.join(chunks_path, chunk_filename)
-            with open(chunk_path, "w", encoding="utf-8") as f:
-                f.write(chunk_text)
-        return True
-    except Exception as e:
-        print(f"Error saving chunks: {e}")
-        return False
+    written_files = []
+    for idx, chunk_text in enumerate(chunks):
+        chunk_filename = f"{base_name}_part{idx:02d}.txt"
+        chunk_path = os.path.join(chunks_path, chunk_filename)
+        with open(chunk_path, "w", encoding="utf-8") as f:
+            f.write(chunk_text)
+        written_files.append(chunk_path)
+
+    return written_files
 
 
 def generate_known_speakers_context(speaker_matches: dict) -> List[str] | str:
@@ -862,12 +855,17 @@ def main():
                 # Select prompt type: first pass uses 'prompt_type_first', subsequent use 'prompt_type_second'
                 prompt_type = first_pass_id if pass_num == 1 else multi_pass_id
 
+                # Writing chunk files
                 enable_chunk_writer = False
                 if enable_chunk_writer:
                     # Prepare transcript for RAG if chunk writer enabled
                     # This will use half the max tokens per chunk with about 16.7% overlap
                     chunks = prepare_text_chunk(transcript, int(args.max_tokens / 2), int(args.max_tokens / 6))
-                    write_chunk_files(chunks, output_dir, meeting_type, base_name)
+                    try:
+                        chunk_files = write_chunk_files(chunks, output_dir, meeting_type, base_name)
+                        print(f"✅ Wrote {len(chunk_files)} chunks to {os.path.join(output_dir, 'chunks', meeting_type)}")
+                    except Exception as e:
+                        print(f"❌ Error writing chunk files: {e}")
 
                 chunks_only = False
                 if chunks_only:
@@ -949,15 +947,14 @@ def main():
             # Write output files per job type
             # ----------------------------
             if args.job_type == "summary":
-                # Write the final summary to an output file
                 final_basename = f"{base_name}.summary"
-                success = write_summary_file(final_summary, final_basename, output_dir, args.output_format)
-                if success:
+                try:
+                    summary_file = write_summary_file(final_summary, final_basename, output_dir, args.output_format)
                     print("\n📝 Final Summary:\n")
                     print(final_summary)
-                    print(f"\n✅ Final summary written to: {os.path.join(output_dir, final_basename)}.{'md' if args.output_format == 'markdown' else 'yaml'}")
-                else:
-                    print("❌ Failed to write final summary file.")
+                    print(f"✅ Final summary written to: {summary_file}")
+                except Exception as e:
+                    print(f"❌ Failed to write summary file: {e}")
             # elif args.job_type == "research":
             #     # Write the final facts gathered to json
             #     final_basename = f"{base_name}.research"
