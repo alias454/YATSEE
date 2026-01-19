@@ -145,17 +145,6 @@ def discover_files(input_path: str, supported_exts, exclude_suffix: str = None) 
     return sorted(files)
 
 
-def load_spacy_model(model_name: str) -> spacy.language.Language:
-    """
-    Load a spaCy model for sentence segmentation.
-
-    :param model_name: Name of the spaCy model (e.g., 'en_core_web_sm').
-    :return: Loaded spaCy Language object.
-    :raises OSError: If the model is not installed.
-    """
-    return spacy.load(model_name)
-
-
 def collapse_inline(line: str, inline_max: int = 5) -> str:
     """
     Collapse repeated inline phrases within a single line.
@@ -487,7 +476,7 @@ def main() -> int:
             return 1
 
         try:
-            spacy_model = load_spacy_model(spacy_model_name)
+            spacy_model = spacy.load(spacy_model_name)
             print(f"✓ Using spaCy model: {spacy_model_name}")
         except OSError:
             print(
