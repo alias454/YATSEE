@@ -1,34 +1,61 @@
 #!/usr/bin/env python3
 """
-YATSEE Vector Indexer
+yatsee_indexer.py
 
-This script creates a vector index for city council transcripts and summaries
-using ChromaDB and SentenceTransformers. It supports entity-specific configuration,
-chunked indexing, and NER metadata extraction.
+Stage 6 of the YATSEE pipeline: index city council transcripts and summary
+documents into a vector database for semantic search and analysis.
 
-Features:
-- Load global and entity-specific TOML configs
-- Split text into sentence-based chunks with overlap
-- Extract metadata including finance, council, and zoning types
-- Named Entity Recognition for organizations, money, and persons
-- Index both summaries and transcripts into ChromaDB
+Inputs:
+  - Summary files (.md) located in the entity summarization directory
+  - Transcript files (.txt) located in the normalized transcript directory
+  - Optional segment JSONL files (.segments.jsonl) for timestamp alignment
+  - Global and entity-specific TOML configurations
+
+Outputs:
+  - Upserts document chunks into a ChromaDB collection with:
+      * Embedded vector representation
+      * Metadata including source, category, type, date, video_id, chunk index
+      * Named Entity Recognition fields (ORG, MONEY, PERSON) for transcripts
+      * Optional timestamp alignment to segments
+
+Key Features:
+  - Config-driven: merges entity-specific settings with global defaults
+  - Sentence-aware chunking with configurable chunk size and overlap
+  - Prepend optional text to chunks (e.g., "Transcript excerpt: ")
+  - Batch embedding via SentenceTransformer for efficiency
+  - Vectorized segment alignment using cosine similarity
+  - Skips empty files/chunks and handles missing segment files gracefully
+  - CLI interface for entity selection, model specification, and indexing options
+
+Dependencies:
+  - Python 3 standard libraries: os, sys, json, re, argparse
+  - Third-party: chromadb, numpy, spacy, toml, sentence_transformers, tqdm
+
+Example Usage:
+  ./yatsee_indexer.py -e us_ca_fresno_city_council --config yatsee.toml \
+      --model BAAI/bge-small-en-v1.5 --spacy-model en_core_web_md \
+      --summary_chunk 300 --summary_overlap 50 \
+      --transcript_chunk 150 --transcript_overlap 25
 """
 
 # Standard library
 import argparse
+import gc
+import json
 import os
 import re
 import sys
-from glob import glob
+import textwrap
 from typing import Any, Dict, List, Tuple
 
 # Third-party imports
 import chromadb
+import numpy as np
 import spacy
+import torch
 import toml
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
-
 
 def load_global_config(path: str) -> Dict[str, Any]:
     """
@@ -84,6 +111,52 @@ def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any
         else:
             merged[key] = value
     return merged
+
+
+def discover_files(input_path: str, supported_exts, exclude_suffix: str = None) -> List[str]:
+    """
+    Collect files from a directory or single file based on allowed extensions.
+
+    :param input_path: Path to directory or file
+    :param supported_exts: Supported file extensions tuple (e.g., ".vtt, .txt")
+    :param exclude_suffix: Optional suffix to exclude from results
+    :return: Sorted list of valid file paths
+    :raises FileNotFoundError: If path does not exist
+    :raises ValueError: If single file has unsupported extension
+    """
+    files: List[str] = []
+
+    if os.path.isdir(input_path):
+        for f in os.listdir(input_path):
+            full = os.path.join(input_path, f)
+            if (
+                os.path.isfile(full)
+                and f.lower().endswith(supported_exts)
+                and (exclude_suffix is None or not f.lower().endswith(exclude_suffix))
+            ):
+                files.append(full)
+    elif os.path.isfile(input_path):
+        if input_path.lower().endswith(supported_exts) and (
+            exclude_suffix is None or not input_path.lower().endswith(exclude_suffix)
+        ):
+            files.append(input_path)
+        else:
+            raise ValueError(f"Unsupported file extension or excluded: {os.path.basename(input_path)}")
+    else:
+        raise FileNotFoundError(f"Path not found: {input_path}")
+
+    return sorted(files)
+
+
+def clear_gpu_cache() -> None:
+    """
+    Clear PyTorch GPU cache and trigger garbage collection.
+
+    Useful to reduce memory pressure when transcribing large audio files on CUDA devices.
+    """
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
 
 
 def load_video_id_map(id_map_path: str) -> Dict[str, str]:
@@ -181,58 +254,48 @@ def parse_metadata(filename: str, category: str, id_map: Dict[str, str]) -> Dict
     return meta
 
 
-def index_documents(
-    files: List[str],
-    nlp_model,
-    embedder,
-    collection,
-    id_map: Dict[str, str],
-    chunk_size: int,
-    overlap: int,
-    category: str,
-    prepend_text: str = "",
-) -> int:
+def index_summaries(files: list, nlp_model, embedder, collection, id_map: dict, chunk_size: int, overlap: int, prepend_text: str = "") -> int:
     """
-    Index a list of text files into ChromaDB.
+    Index a list of summary text files into ChromaDB with sentence-based chunking.
 
-    :param files: List of file paths
-    :param nlp_model: SpaCy model for sentence splitting and NER
-    :param embedder: SentenceTransformer model for embeddings
-    :param collection: ChromaDB collection
-    :param id_map: Video ID map for metadata
-    :param chunk_size: Max words per chunk
-    :param overlap: Overlap words between chunks
-    :param category: 'summary' or 'raw_transcript'
-    :param prepend_text: Optional text prefix for each chunk (e.g., "Transcript excerpt:")
-    :return: Number of documents indexed
+    Each file is split into chunks based on sentence boundaries, optionally prepended with
+    custom text, and embedded using the provided embedding model. Metadata for each chunk
+    includes the original source file and a chunk index.
+
+    Notes:
+    - Empty files or empty chunks are skipped.
+    - Embeddings are computed in batch for efficiency.
+    - No segment alignment or NER is performed for summaries.
+
+    :param files: List of file paths containing summary text
+    :param nlp_model: SpaCy model used for sentence tokenization
+    :param embedder: SentenceTransformer model used for embeddings
+    :param collection: ChromaDB collection where documents will be upserted
+    :param id_map: Dictionary mapping video IDs or sources for metadata enrichment
+    :param chunk_size: Maximum number of words per chunk
+    :param overlap: Number of words to overlap between consecutive chunks
+    :param prepend_text: Optional text to prepend to each chunk
+    :return: Total number of chunks indexed
     """
     total_indexed = 0
 
-    for path in tqdm(files, desc=f"Indexing {category}"):
+    for path in tqdm(files, desc="Indexing summaries"):
         filename = os.path.basename(path)
+        base_meta = parse_metadata(filename, "summary", id_map)
+        ids, docs, metas = [], [], []
+
         with open(path, "r", encoding="utf-8") as f:
             text = f.read().strip()
         if not text:
             continue
 
         chunks = split_text_sentences(text, nlp_model, chunk_size, overlap)
-        base_meta = parse_metadata(filename, category, id_map)
 
-        ids, docs, metas = [], [], []
         for i, chunk in enumerate(chunks):
             doc_meta = base_meta.copy()
             doc_meta["chunk_index"] = i
 
-            if category == "raw_transcript":
-                ner_doc = nlp_model(chunk)
-                orgs = list(set([e.text for e in ner_doc.ents if e.label_ == "ORG"]))
-                money = list(set([e.text for e in ner_doc.ents if e.label_ == "MONEY"]))
-                persons = list(set([e.text for e in ner_doc.ents if e.label_ == "PERSON"]))
-                if orgs: doc_meta["orgs"] = ", ".join(orgs)
-                if money: doc_meta["money"] = ", ".join(money)
-                if persons: doc_meta["persons"] = ", ".join(persons)
-
-            ids.append(f"{category.upper()}_{filename}_{i}")
+            ids.append(f"SUMMARY_{filename}_{i}")
             docs.append(f"{prepend_text}{chunk}" if prepend_text else chunk)
             metas.append(doc_meta)
 
@@ -244,21 +307,136 @@ def index_documents(
     return total_indexed
 
 
-def main() -> int:
+def index_transcripts(files: list, nlp_model, embedder, collection, id_map: dict, chunk_size: int, overlap: int, prepend_text: str = "", segments_dir: str = None) -> int:
     """
-    Main CLI entry point for YATSEE indexer.
+   Index transcript files into ChromaDB with top-ranked segment alignment.
 
-    :return: Exit code (0 = success, 1 = failure)
+    - Splits transcript into overlapping chunks
+    - Computes embeddings for chunks
+    - Aligns chunks to precomputed segment embeddings using top match
+    - Adds NER metadata for chunks > 10 words
+    - Inserts into ChromaDB collection
+
+    :param files: List of transcript file paths
+    :param nlp_model: SpaCy model for sentence splitting and NER
+    :param embedder: SentenceTransformer model for embeddings
+    :param collection: ChromaDB collection for storage
+    :param id_map: Video ID mapping dictionary for metadata enrichment
+    :param chunk_size: Maximum number of words per chunk
+    :param overlap: Number of words to overlap between chunks
+    :param prepend_text: Optional text to prepend to each chunk
+    :param segments_dir: Directory containing *_segments.jsonl files for timestamp alignment
+    :return: Total number of chunks indexed
     """
-    parser = argparse.ArgumentParser(description="Yatsee Indexer")
+    total_indexed = 0
+
+    for path in tqdm(files, desc="Indexing transcripts"):
+        filename = os.path.basename(path)
+        base_meta = parse_metadata(filename, "raw_transcript", id_map)
+        ids, docs, metas = [], [], []
+
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read().strip()
+        if not text:
+            continue
+
+        chunks = split_text_sentences(text, nlp_model, chunk_size, overlap)
+        if not chunks:
+            continue
+
+        chunk_embeddings = embedder.encode(chunks, normalize_embeddings=True, show_progress_bar=False)
+        chunk_embs_arr = np.array(chunk_embeddings, dtype=np.float32)
+        chunk_norms = np.linalg.norm(chunk_embs_arr, axis=1, keepdims=True)
+        chunk_norms[chunk_norms == 0] = 1e-10
+
+        segment_list = []
+        if segments_dir:
+            stem = os.path.splitext(filename)[0]
+            seg_path = os.path.join(segments_dir, f"{stem}.segments.jsonl")
+            if os.path.exists(seg_path):
+                with open(seg_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        row = json.loads(line)
+                        seg_emb = row.get("embedding")
+                        if seg_emb is not None:
+                            segment_list.append({"embedding": seg_emb, "ts": row.get("start_time")})
+
+        if segment_list:
+            seg_embs = np.array([s["embedding"] for s in segment_list], dtype=np.float32)
+            seg_norms = np.linalg.norm(seg_embs, axis=1)
+            seg_norms[seg_norms == 0] = 1e-10
+            similarity_matrix = np.dot(chunk_embs_arr, seg_embs.T) / (chunk_norms * seg_norms)
+            # Pick top match for every chunk
+            best_indices = np.argmax(similarity_matrix, axis=1)
+        else:
+            best_indices = [None] * len(chunks)
+
+        for i, chunk in enumerate(chunks):
+            if not chunk.strip():
+                continue
+
+            doc_meta = base_meta.copy()
+            doc_meta["chunk_index"] = i
+            # Always assign TS from top-ranked segment if available
+            doc_meta["ts"] = segment_list[best_indices[i]]["ts"] if best_indices[i] is not None else None
+
+            if len(chunk.split()) > 10:
+                ner_doc = nlp_model(chunk)
+                orgs = {e.text for e in ner_doc.ents if e.label_ == "ORG"}
+                money = {e.text for e in ner_doc.ents if e.label_ == "MONEY"}
+                persons = {e.text for e in ner_doc.ents if e.label_ == "PERSON"}
+                if orgs: doc_meta["orgs"] = ", ".join(orgs)
+                if money: doc_meta["money"] = ", ".join(money)
+                if persons: doc_meta["persons"] = ", ".join(persons)
+
+            ids.append(f"TRANSCRIPT_{filename}_{i}")
+            docs.append(chunk if not prepend_text else f"{prepend_text}{chunk}")
+            metas.append(doc_meta)
+
+        if docs:
+            collection.upsert(ids=ids, documents=docs, embeddings=chunk_embs_arr[:len(docs)], metadatas=metas)
+            total_indexed += len(docs)
+
+    return total_indexed
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Index city council summaries and transcripts into a vector database using ChromaDB and SentenceTransformers.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""
+            Requirements:
+              - Python 3.10+
+              - chromadb
+              - numpy
+              - spacy
+              - toml
+              - sentence_transformers
+              - tqdm
+              - os, sys, json, re, argparse (standard library)
+
+            Usage Examples:
+              python yatsee_indexer.py -e defined_entity
+              python yatsee_indexer.py --model BAAI/bge-small-en-v1.5 --spacy-model en_core_web_md
+              python yatsee_indexer.py -e defined_entity --summary_chunk 500 --summary_overlap 50
+              python yatsee_indexer.py --transcript_chunk 150 --transcript_overlap 25 --force
+        """)
+    )
+    parser.add_argument(
+        "-d", "--device",
+        choices=["auto", "cuda", "cpu", "mps"],
+        default="auto",
+        help="Device for model execution: 'cuda' for NVIDIA GPU, 'mps' for Apple Silicon Support, 'cpu' for compatibility. Default is 'auto'"
+    )
     parser.add_argument("-e", "--entity", help="Entity handle to process")
     parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to global yatsee.toml")
-    parser.add_argument("-m", "--model", help="SentenceTransformer model name")
-    parser.add_argument("--summary_chunk", type=int, default=300)
-    parser.add_argument("--summary_overlap", type=int, default=50)
-    parser.add_argument("--transcript_chunk", type=int, default=150)
-    parser.add_argument("--transcript_overlap", type=int, default=25)
-    parser.add_argument("--force", action="store_true", help="Force reindexing even if DB exists")
+    parser.add_argument("-m", "--model", help="SentenceTransformer model name for embeddings")
+    parser.add_argument("-s", "--spacy-model", type=str, help="spaCy model to use for sentence splitting and NER (e.g., en_core_web_md)")
+    parser.add_argument("--summary_chunk", type=int, default=300, help="Maximum number of words per summary chunk")
+    parser.add_argument("--summary_overlap", type=int, default=50, help="Number of words to overlap between summary chunks")
+    parser.add_argument("--transcript_chunk", type=int, default=150, help="Maximum number of words per transcript chunk")
+    parser.add_argument("--transcript_overlap", type=int, default=25, help="Number of words to overlap between transcript chunks")
+    parser.add_argument("--force", action="store_true", help="Force reindexing even if the database already exists")
     args = parser.parse_args()
 
     # Determine input/output paths
@@ -272,59 +450,109 @@ def main() -> int:
             print(f"❌ Config load failed: {e}", file=sys.stderr)
             return 1
 
-    data_path = entity_cfg.get("data_path")
-    if not data_path or not os.path.exists(data_path):
-        print(f"❌ Invalid data path: {data_path}", file=sys.stderr)
+    # -----------------------------------------
+    # Validate device for SentenceTransformer
+    # -----------------------------------------
+    if torch.cuda.is_available() and args.device in ["auto", "cuda"]:
+        clear_gpu_cache()
+        device = "cuda"
+    elif torch.backends.mps.is_available() and args.device in ["auto", "mps"]:
+        # Apple Silicon Support
+        device = "mps"
+    else:
+        if args.device == "cuda":
+            print("⚠️ CUDA requested but not available, falling back to CPU.", file=sys.stderr)
+        if args.device == "mps":
+            print("⚠️ MPS requested but not available, falling back to CPU.", file=sys.stderr)
+        device = "cpu"
+
+    # Only create the jsonl if using embeddings
+    embedding_model = (
+        args.model
+        or entity_cfg.get("embedding_model")
+        or global_cfg.get("system", {}).get("default_embedding_model", "BAAI/bge-small-en-v1.5")
+    )
+    print(f"⚡ Loading SentenceTransformer model {embedding_model}...")
+    embedder = SentenceTransformer(embedding_model, device=device)
+
+    # Load spaCy model
+    spacy_model_name = (
+        args.spacy_model
+        or entity_cfg.get("sentence_model")
+        or global_cfg.get("system", {}).get("default_sentence_model", "en_core_web_sm")
+    )
+    if not spacy_model_name:
+        print("❌ No spaCy model specified from CLI, entity config, or system config.", file=sys.stderr)
         return 1
 
-    chroma_path = os.path.join(data_path, "yatsee_db")
-    summary_dir = os.path.join(data_path, global_cfg["models"][entity_cfg["summarization_model"]]["append_dir"])
-    transcript_dir = os.path.join(data_path, "normalized")
-    download_tracker = os.path.join(data_path, "downloads", ".downloaded")
-
-    if not os.path.exists(summary_dir):
-        print(f"❌ Summary directory does not exist: {summary_dir}", file=sys.stderr)
-        return 1
-    if not os.path.exists(transcript_dir):
-        print(f"❌ Transcript directory does not exist: {transcript_dir}", file=sys.stderr)
-        return 1
-
-    print(f"⚡ Loading SentenceTransformer model {args.model or 'BAAI/bge-small-en-v1.5'}...")
-    embedder = SentenceTransformer(args.model or "BAAI/bge-small-en-v1.5", device="cuda")
-
-    print(f"⚡ Loading SpaCy model {entity_cfg.get('default_sentence_model', 'en_core_web_md')}...")
     try:
-        nlp_model = spacy.load(entity_cfg.get("default_sentence_model", "en_core_web_md"))
+        spacy_model = spacy.load(spacy_model_name)
+        print(f"✓ Using spaCy model: {spacy_model_name}")
     except OSError:
-        print("⚠️ SpaCy model not found, falling back to en_core_web_sm")
-        nlp_model = spacy.load("en_core_web_sm")
+        print(
+            f"❌ spaCy model '{spacy_model_name}' not found. Install with: "
+            f"python -m spacy download {spacy_model_name}",
+            file=sys.stderr
+        )
+        return 1
 
+    download_tracker = os.path.join(entity_cfg["data_path"], "downloads", ".downloaded")
     id_map = load_video_id_map(download_tracker)
     print(f"🗺️ Loaded {len(id_map)} video IDs")
 
+    chroma_path = os.path.join(entity_cfg["data_path"], "yatsee_db")
     client = chromadb.PersistentClient(path=chroma_path)
     collection = client.get_or_create_collection(name="council_knowledge", metadata={"hnsw:space": "cosine"})
 
+    # ------------------
     # Ingest summaries
-    summary_files = glob(os.path.join(summary_dir, "*.summary.md"))
-    print(f"📚 Indexing {len(summary_files)} summaries")
+    # ------------------
+    # Determine input/output directory based on entity or CLI override
+    summary_dir = os.path.join(entity_cfg["data_path"], global_cfg["models"][entity_cfg["summarization_model"]]["append_dir"])
+    summary_files = discover_files(summary_dir,".md")
+    if not summary_files:
+        print(f"❌ Summary directory does not exist: {summary_dir}", file=sys.stderr)
+        return 1
 
-    num_summaries = index_documents(
-        summary_files, nlp_model, embedder, collection, id_map,
-        args.summary_chunk, args.summary_overlap, category="summary"
+    print(f"📚 Indexing {len(summary_files)} summaries")
+    num_summaries = index_summaries(
+        summary_files,
+        spacy_model,
+        embedder,
+        collection,
+        id_map,
+        chunk_size=args.summary_chunk,
+        overlap=args.summary_overlap
     )
 
+    # ------------------
     # Ingest transcripts
-    transcript_files = [
-        f for f in glob(os.path.join(transcript_dir, "*.txt"))
-        if not f.endswith(".punct.txt")
-    ]
-    print(f"🎙️ Indexing {len(transcript_files)} transcripts")
+    # ------------------
+    # Find embeddings to be used for ts alignment if exist
+    segments_dir = os.path.join(entity_cfg["data_path"], f"transcripts_{entity_cfg.get('transcription_model', 'small')}")
+    segment_files = discover_files(segments_dir, ".jsonl")
+    if not segment_files:
+        segments_dir = ""
+        print("↪ No JSONL segments found", file=sys.stderr)
 
-    num_transcripts = index_documents(
-        transcript_files, nlp_model, embedder, collection, id_map,
-        args.transcript_chunk, args.transcript_overlap,
-        category="raw_transcript", prepend_text="Transcript excerpt: "
+    # Determine input/output directory based on entity or CLI override
+    transcript_dir = os.path.join(entity_cfg["data_path"], "normalized")
+    transcript_files = discover_files(transcript_dir, ".txt")
+    if not transcript_files:
+        print(f"❌ Transcript directory does not exist: {transcript_dir}", file=sys.stderr)
+        return 1
+
+    print(f"🎙️ Indexing {len(transcript_files)} transcripts")
+    num_transcripts = index_transcripts(
+        transcript_files,
+        spacy_model,
+        embedder,
+        collection,
+        id_map,
+        chunk_size=args.transcript_chunk,
+        overlap=args.transcript_overlap,
+        prepend_text="Transcript excerpt: ",
+        segments_dir=segments_dir
     )
 
     print(f"\n✅ Indexing complete: {num_summaries} summaries, {num_transcripts} transcripts")

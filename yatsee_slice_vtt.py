@@ -34,6 +34,7 @@ Example Usage:
 
 # Standard library
 import argparse
+import gc
 import hashlib
 import json
 import os
@@ -46,7 +47,9 @@ from typing import Any, Dict, List, Optional
 
 # Third-party imports
 import toml
+import torch
 import webvtt
+from sentence_transformers import SentenceTransformer
 
 
 def load_global_config(path: str) -> Dict[str, Any]:
@@ -142,6 +145,17 @@ def discover_files(input_path: str, supported_exts) -> List[str]:
     return sorted(files)
 
 
+def clear_gpu_cache() -> None:
+    """
+    Clear PyTorch GPU cache and trigger garbage collection.
+
+    Useful to reduce memory pressure when transcribing large audio files on CUDA devices.
+    """
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        gc.collect()
+
+
 def read_vtt(vtt_path: str) -> List[Dict[str, Any]]:
     """
     Read a VTT file into a list of cues with absolute timestamps.
@@ -167,7 +181,7 @@ def read_vtt(vtt_path: str) -> List[Dict[str, Any]]:
     return cues
 
 
-def consolidate_sentences(cues: List[Dict[str, Any]], max_window: Optional[float] = None) -> List[Dict[str, Any]]:
+def consolidate_sentences(cues: List[Dict[str, Any]], max_window: Optional[float] = None, min_words: int = 0) -> List[Dict[str, Any]]:
     """
     Merge VTT cues into sentence-bound segments for JSONL and TXT output.
 
@@ -177,6 +191,7 @@ def consolidate_sentences(cues: List[Dict[str, Any]], max_window: Optional[float
 
     :param cues: List of cue dictionaries from read_vtt
     :param max_window: Optional max duration (seconds) per segment
+    :param min_words: Optional minimum number of words tht make up a segment
     :return: List of sentence-aware segments
     """
     segments = []
@@ -197,8 +212,13 @@ def consolidate_sentences(cues: List[Dict[str, Any]], max_window: Optional[float
         seg_end = cue["end"]
         duration = seg_end - seg_start
 
-        # Flush if sentence ends or max_window exceeded
-        if end_punct.search(text) or (max_window and duration >= max_window):
+        word_count = sum(len(s.split()) for s in buffer)
+
+        # Only flush if:
+        # - punctuation exists AND we have enough words
+        # - max_window exceeded
+        if ((end_punct.search(text) and word_count >= min_words) or
+            (max_window and duration >= max_window)):
             segments.append({
                 "start": seg_start,
                 "end": seg_end,
@@ -252,7 +272,7 @@ def load_video_id_map(id_map_path: str) -> Dict[str, str]:
     return id_map
 
 
-def write_jsonl(segments: List[Dict[str, Any]], jsonl_path: str, source_id: str, video_id: str) -> None:
+def write_jsonl(segments: List[Dict[str, Any]], jsonl_path: str, source_id: str, video_id: str, embeddings: Optional[List[List[float]]] = None) -> None:
     """
     Write sentence-aware segments to JSONL for vector search or timestamp mapping.
 
@@ -260,6 +280,7 @@ def write_jsonl(segments: List[Dict[str, Any]], jsonl_path: str, source_id: str,
     :param jsonl_path: Output file path (.jsonl)
     :param source_id: Base source ID for segment identifiers
     :param video_id: YouTube ID or placeholder
+    :param embeddings: Embeddings for text segment
     """
     with open(jsonl_path, "w", encoding="utf-8") as f:
         for idx, seg in enumerate(segments):
@@ -273,6 +294,10 @@ def write_jsonl(segments: List[Dict[str, Any]], jsonl_path: str, source_id: str,
                 "text_raw": seg["text_raw"],
                 "video_id": video_id
             }
+
+            if embeddings:
+                out["embedding"] = embeddings[idx]
+
             f.write(json.dumps(out, ensure_ascii=False) + "\n")
 
 
@@ -374,6 +399,7 @@ def main() -> int:
               - Python 3.10+
               - webvtt-py
               - toml (for config parsing)
+              - sentence_transformers
               - hashlib, json, os, sys (standard library)
 
             Usage Examples:
@@ -383,12 +409,19 @@ def main() -> int:
               python yatsee_slice_vtt.py -e defined_entity --quiet
         """)
     )
+    parser.add_argument(
+        "-d", "--device",
+        choices=["auto", "cuda", "cpu", "mps"],
+        default="auto",
+        help="Device for model execution: 'cuda' for NVIDIA GPU, 'mps' for Apple Silicon Support, 'cpu' for compatibility. Default is 'auto'"
+    )
     parser.add_argument("-e", "--entity", help="Entity handle to process")
     parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to the global YATSEE configuration file")
     parser.add_argument("-i", "--vtt-input", help="Input file or directory")
     parser.add_argument("-o", "--output-dir", type=str, help="Output directory")
+    parser.add_argument("-m", "--model", help="SentenceTransformer model name")
+    parser.add_argument("-g", "--gen-embed", action="store_true", help="Generate JSONL with embeddings and timestamps")
     parser.add_argument("--max-window", type=float, default=90.0, help="Hard upper limit on segment length")
-    parser.add_argument("--create-txt", action="store_true", help="Generate plain text transcript")
     parser.add_argument("--force", action="store_true", help="Overwrite existing outputs")
     parser.add_argument("--verbose", action="store_true", help="Verbose output")
     parser.add_argument("--quiet", action="store_true", help="Suppress output")
@@ -427,6 +460,31 @@ def main() -> int:
     id_map = load_video_id_map(download_tracker)
 
     # -----------------------------------------
+    # Validate device for SentenceTransformer
+    # -----------------------------------------
+    if torch.cuda.is_available() and args.device in ["auto", "cuda"]:
+        clear_gpu_cache()
+        device = "cuda"
+    elif torch.backends.mps.is_available() and args.device in ["auto", "mps"]:
+        # Apple Silicon Support
+        device = "mps"
+    else:
+        if args.device == "cuda":
+            print("⚠️ CUDA requested but not available, falling back to CPU.", file=sys.stderr)
+        if args.device == "mps":
+            print("⚠️ MPS requested but not available, falling back to CPU.", file=sys.stderr)
+        device = "cpu"
+
+    # Only create the jsonl if using embeddings
+    embedding_model = (
+        args.model
+        or entity_cfg.get("embedding_model")
+        or global_cfg.get("system", {}).get("default_embedding_model", "BAAI/bge-small-en-v1.5")
+    )
+    print(f"⚡ Loading SentenceTransformer model {embedding_model}...")
+    embedder = SentenceTransformer(embedding_model, device=device)
+
+    # -----------------------------------------
     # Make output files from .vtt input
     # -----------------------------------------
     for vtt_file in vtt_files_list:
@@ -442,41 +500,51 @@ def main() -> int:
 
         try:
             cues = read_vtt(vtt_file)
-            segments = consolidate_sentences(cues, max_window=args.max_window)
             if not cues:
                 raise ValueError("No cues found in VTT")
         except (OSError, webvtt.errors.MalformedFileError, ValueError) as e:
             print(f"❌ Failed to read VTT '{vtt_file}': {e}", file=sys.stderr)
             continue
 
-        # Write TXT transcript if requested
-        if args.create_txt:
-            txt_path = os.path.join(output_directory, f"{base_name}.txt")
-            try:
-                if not os.path.exists(txt_path) or args.force:
-                    write_txt(segments, txt_path)
-                    if not args.quiet:
-                        print(f"✓ Wrote {txt_path}")
-                elif not args.quiet:
-                    print(f"ℹ Skipped (exists): {txt_path}")
-            except OSError as e:
-                print(f"❌ Failed to write TXT '{txt_path}': {e}", file=sys.stderr)
-
-        # Write segment JSONL safely
-        jsonl_path = os.path.join(output_directory, f"{base_name}.segments.jsonl")
+        # Write TXT transcript always
+        txt_path = os.path.join(output_directory, f"{base_name}.txt")
         try:
-            # segments = fixed_slice_cues(cues, base_name, args.window, video_id)
-            # if not segments:
-            #     raise ValueError("No segments generated")
+            if not os.path.exists(txt_path) or args.force:
+                txt_segments = consolidate_sentences(cues, max_window=args.max_window)
 
-            if not os.path.exists(jsonl_path) or args.force:
-                write_jsonl(segments, jsonl_path, base_name, video_id)
+                write_txt(txt_segments, txt_path)
                 if not args.quiet:
-                    print(f"✓ Wrote {jsonl_path} ({len(segments)} segments)")
+                    print(f"✓ Wrote {txt_path}")
             elif not args.quiet:
-                print(f"ℹ Skipped (exists): {jsonl_path}")
-        except (OSError, ValueError) as e:
-            print(f"❌ Failed to generate/write segments for '{vtt_file}': {e}", file=sys.stderr)
+                print(f"ℹ Skipped (exists): {txt_path}")
+        except OSError as e:
+            print(f"❌ Failed to write TXT '{txt_path}': {e}", file=sys.stderr)
+
+        # Write JSONL if selected
+        if args.gen_embed:
+            # Write segment JSONL safely
+            jsonl_path = os.path.join(output_directory, f"{base_name}.segments.jsonl")
+            try:
+                # segments = fixed_slice_cues(cues, base_name, args.window, video_id)
+                # if not segments:
+                #     raise ValueError("No segments generated")
+
+                if not os.path.exists(jsonl_path) or args.force:
+                    jsonl_segments = consolidate_sentences(cues, max_window=args.max_window, min_words=15)
+
+                    texts = [seg["text_raw"] for seg in jsonl_segments]
+                    embeddings = embedder.encode(texts, batch_size=32, normalize_embeddings=True, show_progress_bar=not args.quiet).tolist()
+                    if len(embeddings) != len(jsonl_segments):
+                        raise RuntimeError(
+                            f"Embedding/Segment count mismatch: E:{len(embeddings)} vs S:{len(jsonl_segments)}")
+
+                    write_jsonl(jsonl_segments, jsonl_path, base_name, video_id, embeddings)
+                    if not args.quiet:
+                        print(f"✓ Wrote {jsonl_path} ({len(jsonl_segments)} segments)")
+                elif not args.quiet:
+                    print(f"ℹ Skipped (exists): {jsonl_path}")
+            except (OSError, ValueError) as e:
+                print(f"❌ Failed to generate/write segments for '{vtt_file}': {e}", file=sys.stderr)
 
     return 0
 

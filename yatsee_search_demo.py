@@ -79,10 +79,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
 # ============================================================================
 # CONFIG LOADING
 # ============================================================================
-
 def load_global_config(path: str) -> Dict[str, Any]:
     """
     Load the global YATSEE configuration file.
@@ -156,7 +156,6 @@ def load_entity_config(global_cfg: Dict[str, Any], entity: str) -> Dict[str, Any
 # ============================================================================
 # CONFIG RESOLUTION (RUNTIME CONSTANTS)
 # ============================================================================
-
 try:
     global_cfg = load_global_config(args.config)
     entity_cfg = load_entity_config(global_cfg, entity)
@@ -184,15 +183,15 @@ TRANSCRIPT_DIR = os.path.join(data_path, "normalized")
 DOWNLOAD_TRACKER = os.path.join(data_path, "downloads", ".downloaded")
 
 # UI tuning defaults
-TOP_K = 10
+TOP_K = 25
 SNIPPET_CHARS = 350
 MIN_SNIPPET_LENGTH = 50
-
+SUMMARY_BOOST = 0.0
+MIN_SCORE = 0.3
 
 # ============================================================================
 # CACHED RESOURCES (MODELS, DB, LOOKUPS)
 # ============================================================================
-
 @st.cache_resource
 def load_model(embedding_model: str) -> SentenceTransformer:
     """
@@ -205,6 +204,7 @@ def load_model(embedding_model: str) -> SentenceTransformer:
     """
     with st.spinner(f"⚡ Loading AI Engine ({embedding_model})..."):
         return SentenceTransformer(embedding_model, device="cuda")
+embedder = load_model(MODEL_NAME)
 
 
 @st.cache_resource
@@ -244,6 +244,21 @@ def load_video_id_map(tracker_path: str = DOWNLOAD_TRACKER) -> Dict[str, str]:
 # ============================================================================
 # TEXT & METADATA UTILITIES
 # ============================================================================
+def get_summary_files(summary_dir):
+    # --- Summaries ---
+    summary_paths = sorted(glob(os.path.join(summary_dir, "*.summary.md")))
+    summaries: List[Dict[str, Any]] = []
+    for path in summary_paths:
+        label, date_str = extract_context_from_filename(path)
+        summaries.append({
+            "path": path,
+            "filename": os.path.basename(path),
+            "label": label,
+            "date": date_str
+        })
+
+    return sorted(summaries, key=lambda x: x["date"], reverse=True)
+
 
 def load_text_file(path: str) -> str:
     """
@@ -308,7 +323,7 @@ def extract_context_from_filename(filename: str, extra_note: str = None) -> str:
     return f"{label} | {date_str}", date_str
 
 
-def get_video_url(filename: str) -> str:
+def get_video_url(filename: str) -> str | None:
     """
     Reconstruct a YouTube URL from a transcript filename.
 
@@ -321,6 +336,7 @@ def get_video_url(filename: str) -> str:
             id_map = load_video_id_map()
             real_id = id_map.get(file_id.lower(), file_id)
             return f"https://www.youtube.com/watch?v={real_id}"
+
     return None
 
 
@@ -338,31 +354,59 @@ def calculate_text_stats(text: str) -> Dict[str, Any]:
     }
 
 
+def generate_snippet(text: str, query: str, max_chars: int = SNIPPET_CHARS, min_len: int = MIN_SNIPPET_LENGTH,) -> str:
+    """
+    Generate a guaranteed-visible snippet for display.
+
+    Falls back to a leading excerpt if highlighting produces
+    an undersized result.
+
+    :param text: Document text
+    :param query: User query
+    :return: Snippet string
+    """
+    snippet = highlight_snippet(text, query, max_chars)
+    if not snippet or len(snippet) < min_len:
+        return text[:max_chars] + "..."
+    return snippet
+
+
+def highlight_snippet(text: str, query: str, max_chars: int = 300,) -> str:
+    """
+    Extract and highlight a snippet centered around the first query match.
+
+    Guarantees keyword visibility where possible.
+
+    :param text: Full document text
+    :param query: Search query
+    :param max_chars: Maximum snippet length
+    :return: Highlighted snippet
+    """
+    q = query.lower()
+    lower = text.lower()
+    match = re.search(re.escape(q), lower)
+
+    if not match:
+        snippet = text[:max_chars].strip()
+        return snippet + "..." if len(text) > max_chars else snippet
+
+    start = max(0, match.start() - max_chars // 2)
+    end = min(len(text), match.end() + max_chars // 2)
+    snippet = text[start:end]
+
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(text):
+        snippet += "..."
+
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    return pattern.sub(lambda m: f"**{m.group(0)}**", snippet)
+
+
 # ============================================================================
 # SEARCH PIPELINE (EMBEDDING + QUERY + RERANK)
 # ============================================================================
-
-embedder = load_model(MODEL_NAME)
-
-
-def get_vector(query: str) -> List[float]:
-    """
-    Generate an embedding vector for a search query.
-
-    Uses the standard instruction prefix expected by BGE-style models
-    to ensure embeddings are aligned with passage representations.
-
-    :param query: User search query
-    :return: Normalized embedding vector
-    """
-    instruction = "Represent this sentence for searching relevant passages: "
-    return embedder.encode(
-        instruction + query,
-        normalize_embeddings=True,
-    ).tolist()
-
-
-def chroma_query(vector: List[float], n_results: int = 10, category: str = None,) -> List[Dict[str, Any]]:
+def chroma_query(vector: List[float], n_results: int = 10, category: str = None) -> List[Dict[str, Any]]:
     """
     Execute a vector similarity search against ChromaDB.
 
@@ -399,7 +443,7 @@ def chroma_query(vector: List[float], n_results: int = 10, category: str = None,
     return results
 
 
-def literal_boost(results: List[Dict[str, Any]], query: str, boost: float = 0.2, demote: float = 0.5,) -> List[Dict[str, Any]]:
+def literal_boost(results: List[Dict[str, Any]], query: str, boost: float = 0.5, demote: float = 0.5) -> List[Dict[str, Any]]:
     """
     Boost results containing literal query matches.
 
@@ -413,96 +457,39 @@ def literal_boost(results: List[Dict[str, Any]], query: str, boost: float = 0.2,
     :return: Re-ranked results
     """
     q = query.lower()
-
     for r in results:
         text = r["document"].lower()
-        base = r.get("similarity", 0.0)
-
+        base = r.get("score", r.get("similarity", 0.0))
         if q in text:
             r["score"] = base + boost
         else:
             r["score"] = base * demote
-
     return sorted(results, key=lambda r: r["score"], reverse=True)
 
 
-def hybrid_rerank(results: List[Dict[str, Any]], query: str, alpha: float = 0.7,) -> List[Dict[str, Any]]:
+def hybrid_rerank(results: List[Dict[str, Any]], query: str, alpha: float = 0.3, literal_boost_value: float = 1.0) -> list[dict]:
     """
     Combine embedding similarity with literal presence scoring.
 
     This is a softer alternative to literal boosting and works
     better for partial or noisy matches.
 
-    :param results: Search results
+    :param results: Chroma search results
     :param query: User query
     :param alpha: Weight for embedding similarity
+    :param literal_weight_fn: Optional function(text, query) -> float for literal scoring
     :return: Re-ranked results
     """
     q = query.lower()
-
     for r in results:
+        r.setdefault("score", r.get("similarity", 0.0))  # make sure score exists
         text = r["document"].lower()
-        literal = 1.0 if q in text else 0.0
-        r["score"] = alpha * r["similarity"] + (1 - alpha) * literal
-
+        literal = literal_boost_value if q in text else 0.0
+        r["score"] = alpha * r["score"] + (1 - alpha) * literal
     return sorted(results, key=lambda r: r["score"], reverse=True)
 
 
-def highlight_snippet(text: str, query: str, max_chars: int = 300,) -> str:
-    """
-    Extract and highlight a snippet centered around the first query match.
-
-    Guarantees keyword visibility where possible.
-
-    :param text: Full document text
-    :param query: Search query
-    :param max_chars: Maximum snippet length
-    :return: Highlighted snippet
-    """
-    q = query.lower()
-    lower = text.lower()
-    match = re.search(re.escape(q), lower)
-
-    if not match:
-        snippet = text[:max_chars].strip()
-        return snippet + "..." if len(text) > max_chars else snippet
-
-    start = max(0, match.start() - max_chars // 2)
-    end = min(len(text), match.end() + max_chars // 2)
-    snippet = text[start:end]
-
-    if start > 0:
-        snippet = "..." + snippet
-    if end < len(text):
-        snippet += "..."
-
-    pattern = re.compile(re.escape(query), re.IGNORECASE)
-    return pattern.sub(lambda m: f"**{m.group(0)}**", snippet)
-
-
-def generate_snippet(text: str, query: str, max_chars: int = SNIPPET_CHARS, min_len: int = MIN_SNIPPET_LENGTH,) -> str:
-    """
-    Generate a guaranteed-visible snippet for display.
-
-    Falls back to a leading excerpt if highlighting produces
-    an undersized result.
-
-    :param text: Document text
-    :param query: User query
-    :return: Snippet string
-    """
-    snippet = highlight_snippet(text, query, max_chars)
-    if not snippet or len(snippet) < min_len:
-        return text[:max_chars] + "..."
-    return snippet
-
-
-def aggregate_results(
-    summary_results: List[Dict[str, Any]],
-    transcript_results: List[Dict[str, Any]],
-    query: str,
-    boost_summary: float = 0.1,
-) -> List[Dict[str, Any]]:
+def aggregate_results(summary_results: List[Dict[str, Any]], transcript_results: List[Dict[str, Any]], query: str, boost_summary: float = 0.1) -> List[Dict[str, Any]]:
     """
     Merge, deduplicate, and score results from multiple sources.
 
@@ -547,15 +534,9 @@ def literal_fallback(query: str) -> List[Dict[str, Any]]:
     """
     results: Dict[str, Dict[str, Any]] = {}
 
-    files = (
-        glob(os.path.join(TRANSCRIPT_DIR, "*.txt"))
-        + glob(os.path.join(SUMMARY_DIR, "*.md"))
-    )
+    files = (glob(os.path.join(TRANSCRIPT_DIR, "*.txt")) + glob(os.path.join(SUMMARY_DIR, "*.md"))    )
 
     for path in files:
-        if path.endswith(".punct.txt"):
-            continue
-
         text = load_text_file(path)
         if query.lower() not in text.lower():
             continue
@@ -570,42 +551,96 @@ def literal_fallback(query: str) -> List[Dict[str, Any]]:
                 "category": "summary" if fname.endswith(".md") else "raw_transcript",
             },
             "snippet": snippet,
-            "score": 2.0,
+            "score": 0.2
         }
 
     return list(results.values())
 
 
-def run_search_pipeline(query_text: str, rerank_strategy: str = "literal",) -> List[Dict[str, Any]]:
+def get_vector(query: str) -> List[float]:
     """
-    Orchestrate the full search pipeline.
+    Generate an embedding vector for a search query.
+
+    Uses the standard instruction prefix expected by BGE-style models
+    to ensure embeddings are aligned with passage representations.
+
+    :param query: User search query
+    :return: Normalized embedding vector
+    """
+    instruction = "Represent this sentence for searching relevant passages: "
+    return embedder.encode(instruction + query, normalize_embeddings=True).tolist()
+
+
+def run_search_pipeline(query_text: str, rerank_strategy: str = "hybrid") -> List[Dict[str, Any]]:
+    """
+    Orchestrate the full search pipeline with debug hints.
 
     Steps:
     - Embed query
     - Vector search (summary + transcript)
-    - Re-rank
+    - Re-rank (literal or hybrid)
     - Aggregate
     - Literal fallback
     """
     if not query_text:
         return []
 
+    # print(f"DEBUG: Running search pipeline for query: '{query_text}'")
+
+    # --- Embed query ---
     vector = get_vector(query_text)
+    # print(f"DEBUG: Generated vector of length {len(vector)}")
 
+    # --- Chroma vector search ---
     summaries = chroma_query(vector, n_results=5, category="summary")
-    transcripts = chroma_query(vector, n_results=35, category="raw_transcript")
+    transcripts = chroma_query(vector, n_results=250, category="raw_transcript")
 
+    # print(f"DEBUG: Retrieved {len(summaries)} summary results and {len(transcripts)} transcript results from Chroma")
+
+    # --- Rerank ---
     if rerank_strategy == "hybrid":
-        summaries = hybrid_rerank(summaries, query_text)
-        transcripts = hybrid_rerank(transcripts, query_text)
+        summaries = hybrid_rerank(summaries, query_text, alpha=0.2)
+        transcripts = hybrid_rerank(transcripts, query_text, alpha=0.7)
+        # print("DEBUG: Applied hybrid rerank")
     else:
         summaries = literal_boost(summaries, query_text)
         transcripts = literal_boost(transcripts, query_text)
+        # print("DEBUG: Applied literal boost rerank")
 
-    aggregated = aggregate_results(summaries, transcripts, query_text)
-    aggregated.extend(literal_fallback(query_text))
+    # Debug top results after rerank
+    # print("DEBUG: Top 5 summary results after rerank:")
+    # for r in summaries[:5]:
+    #     print(f"  {r['metadata'].get('source')} score={r.get('score')}")
+    # print("DEBUG: Top 5 transcript results after rerank:")
+    # for r in transcripts[:5]:
+    #     print(f"  {r['metadata'].get('source')} chunk_index={r['metadata'].get('chunk_index', 'N/A')} score={r.get('score')}")
+
+    # --- Aggregate results ---
+    aggregated = aggregate_results(summaries, transcripts, query_text, SUMMARY_BOOST)
+    # print(f"DEBUG: Aggregated {len(aggregated)} results after merging summaries and transcripts")
+
+    # --- Literal fallback ---
+    fallback_results = literal_fallback(query_text)
+    # print(f"DEBUG: Literal fallback returned {len(fallback_results)} results")
+
+    # Filter out files already present in aggregated
+    existing_sources = {r['meta'].get('source') for r in aggregated}
+    filtered_fallback = [r for r in fallback_results if r['meta'].get('source') not in existing_sources]
+
+    # print(f"DEBUG: Filtered fallback results: {len(filtered_fallback)}")
+    # for r in filtered_fallback:
+    #     print(f"  {r['meta'].get('source')} chunk_index={r['meta'].get('chunk_index', 'N/A')} score={r['score']}")
+
+    aggregated.extend(filtered_fallback)
+
+    # --- Final ranking ---
+    aggregated = [r for r in aggregated if r["score"] >= MIN_SCORE]
 
     aggregated.sort(key=lambda r: r["score"], reverse=True)
+    # print(f"DEBUG: Final top results after sorting (TOP_K={TOP_K}):")
+    # for r in aggregated[:TOP_K]:
+    #     print(f"  {r['meta'].get('source')} score={r['score']}")
+
     return aggregated[:TOP_K]
 
 
@@ -615,8 +650,6 @@ def run_search_pipeline(query_text: str, rerank_strategy: str = "literal",) -> L
 def run_search():
     """
     Trigger the search pipeline and persist results in session state.
-
-    Intended to be called via Streamlit input callbacks.
     """
     query_text = st.session_state.search_input.strip()
     if not query_text:
@@ -625,96 +658,63 @@ def run_search():
 
     st.session_state.last_query = query_text
     st.session_state.viewing_transcript = None
-    st.session_state.search_results = run_search_pipeline(
-        query_text,
-        rerank_strategy="literal",
-    )
+    st.session_state.search_results = run_search_pipeline(query_text, rerank_strategy="literal")
 
 
 # ==========================================
 # SESSION STATE INITIALIZATION
 # ==========================================
-if "search_results" not in st.session_state:
-    st.session_state.search_results = []
-
-if "last_query" not in st.session_state:
-    st.session_state.last_query = None
-
-if "selected_summary" not in st.session_state:
-    st.session_state.selected_summary = "-- Select Meeting --"
-
-if "viewing_transcript" not in st.session_state:
-    st.session_state.viewing_transcript = None
+def init_session_state():
+    st.session_state.setdefault("search_results", [])
+    st.session_state.setdefault("last_query", None)
+    st.session_state.setdefault("selected_summary", "-- Select Meeting --")
+    st.session_state.setdefault("viewing_transcript", None)
+    st.session_state.setdefault("current_entity", entity)
 
 
 # ==========================================
 # UI: SIDEBAR
 # ==========================================
-with st.sidebar:
-    st.header("🗂️ Summaries")
+def render_sidebar(summaries):
+    with st.sidebar:
+        st.header("🗂️ Summaries")
 
-    # After parsing the CLI arg
-    st.session_state.setdefault("current_entity", entity)
+        # --- Summaries ---
+        summary_labels = ["-- Select Meeting --"] + [s["label"] for s in summaries]
+        try:
+            idx = summary_labels.index(st.session_state.selected_summary)
+        except ValueError:
+            idx = 0
 
-    # --- Summaries ---
-    summary_paths = sorted(glob(os.path.join(SUMMARY_DIR, "*.summary.md")))
-    summaries = []
-    for path in summary_paths:
-        label, date_str = extract_context_from_filename(path)
-        summaries.append({
-            "path": path,
-            "filename": os.path.basename(path),
-            "label": label,
-            "date": date_str
-        })
-    summaries.sort(key=lambda x: x["date"], reverse=True)
+        selected_label = st.selectbox("Browse by Meeting:", summary_labels, index=idx)
+        if selected_label != st.session_state.selected_summary:
+            st.session_state.selected_summary = selected_label
+            st.session_state.viewing_transcript = None
+            st.session_state.search_results = []  # Clear search results
+            st.rerun()
 
-    summary_labels = ["-- Select Meeting --"] + [s["label"] for s in summaries]
-    try:
-        idx = summary_labels.index(st.session_state.selected_summary)
-    except ValueError:
-        idx = 0
+        # --- Flexible spacer ---
+        # st.markdown("<br><br><br><br><br>", unsafe_allow_html=True)  # crude spacer, pushes status toward bottom
 
-    selected_label = st.selectbox("Browse by Meeting:", summary_labels, index=idx)
-    if selected_label != st.session_state.selected_summary:
-        st.session_state.selected_summary = selected_label
-        st.session_state.viewing_transcript = None
-        st.session_state.search_results = []  # Clear search results
-        st.rerun()
+        # --- Flexible spacer ---
+        # This creates a container that will take up the available vertical space
+        with st.container():
+            st.markdown(" ", unsafe_allow_html=True)  # A dummy element inside
 
-    # --- Flexible spacer ---
-    # st.markdown("<br><br><br><br><br>", unsafe_allow_html=True)  # crude spacer, pushes status toward bottom
-
-    # --- Flexible spacer ---
-    # This creates a container that will take up the available vertical space
-    with st.container():
-        st.markdown(" ", unsafe_allow_html=True)  # A dummy element inside
-
-
-    # --- System Status ---
-    st.divider()
-    st.caption("⚙️ **System Status**")
-    st.caption(f"• **Current Entity:** {st.session_state.current_entity}")
-    st.caption(f"• **Index:** {COLLECTION_NAME}")
-    st.caption(f"• **Meetings Indexed:** {len(summaries)}")
-    st.caption(f"• **Accelerator:** `{embedder.device}`")
-    st.caption("v1.0 • Local-First")
-
-
-# ==========================================
-# UI: MAIN CONTENT
-# ==========================================
-st.title("🏛️ Yatsee Research Engine")
-st.info(
-    "⚠️ **Research Preview:** Summaries are AI-generated. "
-    "Verify important details against the canonical transcript or recording."
-)
+        # --- System Status ---
+        st.divider()
+        st.caption("⚙️ **System Status**")
+        st.caption(f"• **Current Entity:** {st.session_state.current_entity}")
+        st.caption(f"• **Index:** {COLLECTION_NAME}")
+        st.caption(f"• **Meetings Indexed:** {len(summaries)}")
+        st.caption(f"• **Accelerator:** `{embedder.device}`")
+        st.caption("v1.0 • Local-First")
 
 
 # ==========================================
 # VIEW A: FULL TRANSCRIPT READER
 # ==========================================
-if st.session_state.viewing_transcript:
+def render_transcript_viewer():
     transcript_path = st.session_state.viewing_transcript
     fname = os.path.basename(transcript_path)
     pretty_name, _ = extract_context_from_filename(fname)
@@ -723,12 +723,9 @@ if st.session_state.viewing_transcript:
     with c1:
         st.subheader(f"📄 Transcript: {pretty_name}")
         if st.session_state.last_query:
-            st.caption(
-                f"🔎 Highlight context for query: "
-                f"**'{st.session_state.last_query}'**"
-            )
+            st.caption(f"🔎 Highlight context for query: **'{st.session_state.last_query}'**")
     with c2:
-        if st.button("❌ Close", type="secondary"):
+        if st.button("❌ Close", key="b0", type="secondary"):
             st.session_state.viewing_transcript = None
             st.rerun()
 
@@ -736,7 +733,7 @@ if st.session_state.viewing_transcript:
     st.code(full_text, language=None)
 
     st.divider()
-    if st.button("⬅️ Back to Search Results"):
+    if st.button("❌ Close", key="b1"):
         st.session_state.viewing_transcript = None
         st.rerun()
 
@@ -744,57 +741,57 @@ if st.session_state.viewing_transcript:
 # ==========================================
 # VIEW B: SUMMARY READER
 # ==========================================
-elif st.session_state.selected_summary != "-- Select Meeting --":
-    selected = next(
-        (s for s in summaries if s["label"] == st.session_state.selected_summary), None)
+def render_summary_viewer(summaries):
+    selected = next((s for s in summaries if s["label"] == st.session_state.selected_summary), None)
+    if not selected:
+        return
 
-    if selected:
-        content = load_text_file(selected["path"])
-        stats = calculate_text_stats(content)
+    content = load_text_file(selected["path"])
+    stats = calculate_text_stats(content)
 
-        # --- Navigation / Actions ---
-        c1, c2, c3, c4 = st.columns([1, 3, 1.5, 1.5])
-        with c1:
-            if st.button("⬅️ Search"):
-                st.session_state.selected_summary = "-- Select Meeting --"
-                st.rerun()
-
-        with c3:
-            video_url = get_video_url(selected["filename"])
-            if video_url:
-                st.link_button("📺 View Video", video_url)
-
-        with c4:
-            transcript_filename = selected["filename"].replace(".summary.md", ".txt")
-            transcript_path = os.path.join(TRANSCRIPT_DIR, transcript_filename)
-            if os.path.exists(transcript_path):
-                if st.button("📄 Transcript", type="primary"):
-                    st.session_state.viewing_transcript = transcript_path
-                    st.rerun()
-
-        st.divider()
-
-        # --- Intelligence Dashboard ---
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("📅 Date", selected["date"])
-        m2.metric("📝 Word Count", f"{stats['words']:,}")
-        m3.metric("⏱️ Est. Read Time", stats["read_time"])
-        m4.metric("💰 Money Mentions", stats["money_count"])
-
-        st.divider()
-        st.header(selected["label"])
-        st.markdown(content)
-
-        st.divider()
-        if st.button("⬅️ Back to Search"):
+    # Navigation / actions
+    c1, c2, c3, c4 = st.columns([1, 3, 1.5, 1.5])
+    with c1:
+        if st.button("⬅️ Search"):
             st.session_state.selected_summary = "-- Select Meeting --"
             st.rerun()
+
+    with c3:
+        video_url = get_video_url(selected["filename"])
+        if video_url:
+            st.link_button("📺 View Video", video_url)
+
+    with c4:
+        transcript_filename = selected["filename"].replace(".summary.md", ".txt")
+        transcript_path = os.path.join(TRANSCRIPT_DIR, transcript_filename)
+        if os.path.exists(transcript_path):
+            if st.button("📄 Transcript", type="primary"):
+                st.session_state.viewing_transcript = transcript_path
+                st.rerun()
+
+    st.divider()
+
+    # Intelligence dashboard
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("📅 Date", selected["date"])
+    m2.metric("📝 Word Count", f"{stats['words']:,}")
+    m3.metric("⏱️ Est. Read Time", stats["read_time"])
+    m4.metric("💰 Money Mentions", stats["money_count"])
+
+    st.divider()
+    st.header(selected["label"])
+    st.markdown(content)
+
+    st.divider()
+    if st.button("⬅️ Back to Search"):
+        st.session_state.selected_summary = "-- Select Meeting --"
+        st.rerun()
 
 
 # ==========================================
 # VIEW C: SEARCH INTERFACE (DEFAULT)
 # ==========================================
-else:
+def render_search_view(summaries):
     st.markdown("### Search Archives")
 
     st.text_input(
@@ -805,57 +802,77 @@ else:
         on_change=run_search,
     )
 
-    if st.session_state.search_results:
-        st.divider()
-        st.subheader(
-            f"Found {len(st.session_state.search_results)} results "
-            f"for '{st.session_state.last_query}'"
-        )
+    if not st.session_state.search_results:
+        return
 
-for i, result in enumerate(st.session_state.search_results):
-    meta = result["meta"]
-    snippet = result["snippet"]
+    st.divider()
+    st.subheader(f"Found {len(st.session_state.search_results)} results for '{st.session_state.last_query}'")
 
-    pretty_heading, date = extract_context_from_filename(meta["source"])
-    is_summary = meta.get("category") == "summary"
-    type_label = "📝 [SUMMARY]" if is_summary else "📄 [TRANSCRIPT]"
-    confidence = "High" if i < 3 else "Medium"
+    for i, result in enumerate(st.session_state.search_results):
+        meta = result["meta"]
+        snippet = result["snippet"]
 
-    with st.expander(f"{type_label} {pretty_heading}"):
-        # --- Snippet & meta ---
-        c_snip, c_info = st.columns([3, 1])
-        with c_snip:
-            st.markdown(f"...{snippet}...", unsafe_allow_html=True)
-        with c_info:
-            st.caption(f"**Date:** {date}")
-            st.caption(f"**Relevance:** {confidence}")
-            if meta.get("chunk_index") is not None:
-                st.caption(f"**Chunk:** {meta['chunk_index']}")
-            elif not is_summary:
-                st.caption("**Match:** Literal Text")
+        pretty_heading, date = extract_context_from_filename(meta["source"])
+        is_summary = meta.get("category") == "summary"
+        type_label = "📝 [SUMMARY]" if is_summary else "📄 [TRANSCRIPT]"
+        confidence = "High" if i < 3 else "Medium"
 
-        st.markdown("---")
+        with st.expander(f"{type_label} {pretty_heading}"):
+            # Snippet & meta
+            c_snip, c_info = st.columns([3, 1])
+            with c_snip:
+                st.markdown(f"...{snippet}...", unsafe_allow_html=True)
+            with c_info:
+                st.caption(f"**Date:** {date}")
+                st.caption(f"**Relevance:** {confidence}")
+                if meta.get("chunk_index") is not None:
+                    st.caption(f"**Chunk:** {meta['chunk_index']}")
+                elif not is_summary:
+                    st.caption("**Match:** Literal Text")
+                ts = meta.get("ts")
+                st.caption(f"**Timestamp:** {ts if ts is not None else 'N/A'}")
 
-        # --- Action Buttons ---
-        btn_cols = st.columns(4)
+            st.markdown("---")
 
-        # Video button (if available)
-        video_url = get_video_url(meta["source"])
-        if video_url:
-            btn_cols[3].link_button("📺 Video", video_url)
+            # Action buttons
+            btn_cols = st.columns(4)
+            video_url = get_video_url(meta["source"])
+            if video_url:
+                btn_cols[3].link_button("📺 Video", video_url)
 
-        # Determine the summary file corresponding to this snippet
-        summary_filename = meta["source"].replace(".txt", ".summary.md") if not is_summary else meta["source"]
-        matching_summary = next((s for s in summaries if s["filename"] == summary_filename), None)
-        if matching_summary and btn_cols[0].button("Read Summary", key=f"btn_sum_{i}"):
-            st.session_state.selected_summary = matching_summary["label"]
-            st.session_state.search_results = []  # clear search results
-            st.rerun()
+            summary_filename = meta["source"].replace(".txt", ".summary.md") if not is_summary else meta["source"]
+            matching_summary = next((s for s in summaries if s["filename"] == summary_filename), None)
+            if matching_summary and btn_cols[0].button("Read Summary", key=f"btn_sum_{i}"):
+                st.session_state.selected_summary = matching_summary["label"]
+                st.session_state.search_results = []
+                st.rerun()
 
-        # Determine the transcript file corresponding to this snippet
-        transcript_filename = meta["source"].replace(".summary.md", ".txt") if is_summary else meta["source"]
-        transcript_path = os.path.join(TRANSCRIPT_DIR, transcript_filename)
-        if os.path.exists(transcript_path) and btn_cols[1].button("View Transcript", key=f"btn_trans_{i}"):
-            st.session_state.viewing_transcript = transcript_path
-            st.session_state.search_results = []  # clear search results
-            st.rerun()
+            transcript_filename = meta["source"].replace(".summary.md", ".txt") if is_summary else meta["source"]
+            transcript_path = os.path.join(TRANSCRIPT_DIR, transcript_filename)
+            if os.path.exists(transcript_path) and btn_cols[1].button("View Transcript", key=f"btn_trans_{i}"):
+                st.session_state.viewing_transcript = transcript_path
+                st.session_state.search_results = []
+                st.rerun()
+
+
+# ==========================================
+# MAIN RENDER
+# ==========================================
+st.title("🏛️ Yatsee Research Engine")
+st.info("⚠️ **Research Preview:** Summaries are AI-generated. Verify important details against the canonical transcript or recording.")
+
+# --- Session state init ---
+init_session_state()
+
+# --- Load data ---
+summary_list = get_summary_files(SUMMARY_DIR)
+
+# --- Global UI chrome ---
+render_sidebar(summary_list)
+
+if st.session_state.viewing_transcript:
+    render_transcript_viewer()
+elif st.session_state.selected_summary != "-- Select Meeting --":
+    render_summary_viewer(summary_list)
+else:
+    render_search_view(summary_list)
