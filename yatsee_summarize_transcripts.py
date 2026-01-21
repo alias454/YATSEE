@@ -87,10 +87,8 @@ import requests
 import toml
 import yaml
 
-OLLAMA_SERVER_URL = "http://localhost:11434"
 
-
-def classify_meeting(session: requests.Session, model: str, prompt: str) -> str:
+def classify_meeting(session: requests.Session, llm_provider_url: str, model: str, prompt: str) -> str:
     """
     Classify the type of a meeting transcript using a local Ollama LLM.
 
@@ -99,6 +97,7 @@ def classify_meeting(session: requests.Session, model: str, prompt: str) -> str:
     and validates the label against allowed meeting types.
 
     :param session: A preconfigured requests.Session object for efficient HTTP reuse.
+    :param llm_provider_url: URL of the LLM provider server
     :param model: Name of the model to use (e.g., 'llama3').
     :param prompt: Prompt text containing context and transcript snippet.
     :return: Lowercase meeting type label (e.g., 'city_council') or 'general' if unknown.
@@ -106,7 +105,7 @@ def classify_meeting(session: requests.Session, model: str, prompt: str) -> str:
     """
     payload = {"model": model, "prompt": prompt, "stream": True}
     try:
-        response = session.post(f"{OLLAMA_SERVER_URL}/api/generate", json=payload, stream=True)
+        response = session.post(f"{llm_provider_url}/api/generate", json=payload, stream=True)
         response.raise_for_status()
 
         raw_reply = ""
@@ -419,7 +418,7 @@ def prepare_text_chunk_sentence(text: str, max_tokens: int = 3000) -> list[str]:
     return chunks
 
 
-def summarize_transcript(session: requests.Session, model: str, prompt: str = "detailed", num_ctx: int = 8192) -> str:
+def summarize_transcript(session: requests.Session, llm_provider_url: str, model: str, prompt: str = "detailed", num_ctx: int = 8192) -> str:
     """
     Generate a summary of a transcript using a local Ollama LLM in streaming mode.
 
@@ -428,6 +427,7 @@ def summarize_transcript(session: requests.Session, model: str, prompt: str = "d
     Stops reading the stream once the 'done' flag is reached.
 
     :param session: Active requests.Session to reuse connections efficiently
+    :param llm_provider_url: URL of the LLM provider server
     :param model: Name of the Ollama model to use (e.g., 'llama3')
     :param prompt: Prompt text or template to drive summarization
     :param num_ctx: Maximum context length the model can handle (used in options)
@@ -445,7 +445,7 @@ def summarize_transcript(session: requests.Session, model: str, prompt: str = "d
     }
 
     try:
-        response = session.post(f"{OLLAMA_SERVER_URL}/api/generate", json=payload, stream=True)
+        response = session.post(f"{llm_provider_url}/api/generate", json=payload, stream=True)
         response.raise_for_status()
 
         summary = ""
@@ -795,7 +795,6 @@ def main():
         or entity_cfg.get("summarization_model")
         or global_cfg.get("system", {}).get("default_summarization_model")
     )
-
     if not model:
         logger.error("No model specified. Use --model(-m) or set it in entity/global config.")
         return 1
@@ -837,6 +836,8 @@ def main():
     # Optionally configure session headers, retries, timeouts here
     llm_session.headers.update({"Content-Type": "application/json"})
 
+    llm_provider_url = global_cfg.get("system", {}).get("llm_provider_url")
+
     # ----------------------------
     # Process files for summerizer jobs
     # ----------------------------
@@ -861,7 +862,7 @@ def main():
             if not args.disable_auto_classification:
                 # Try to auto classify the meeting type based off a small snippet of text
                 classifier_prompt = CLASSIFIER_PROMPT.format(context=context, text=transcript[:2000])
-                meeting_type = classify_meeting(session=llm_session, model=model, prompt=classifier_prompt)
+                meeting_type = classify_meeting(session=llm_session, llm_provider_url=llm_provider_url, model=model, prompt=classifier_prompt)
 
                 # track token usage
                 token_usage += estimate_token_count(classifier_prompt)
@@ -922,7 +923,7 @@ def main():
                     prompt_template = PROMPTS.get(prompt_type, PROMPTS["detailed"])
                     chunk_prompt = prompt_template.format(context=context or "No context provided.", text=chunk)
 
-                    chunk_summary = summarize_transcript(llm_session, model, chunk_prompt, num_ctx)
+                    chunk_summary = summarize_transcript(llm_session, llm_provider_url, model, chunk_prompt, num_ctx)
                     chunk_summaries.append(chunk_summary)
 
                     # Update token usage counts
@@ -940,7 +941,7 @@ def main():
                         prompt_template = PROMPTS.get(final_pass_id, PROMPTS["detailed"])
                         final_prompt = prompt_template.format(context=context or "No context provided.", text=summary)
 
-                        transcript = summarize_transcript(llm_session, model, final_prompt, num_ctx)
+                        transcript = summarize_transcript(llm_session, llm_provider_url, model, final_prompt, num_ctx)
 
                         # Update token usage counts
                         token_usage += estimate_token_count(transcript)
