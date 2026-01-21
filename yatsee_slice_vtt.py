@@ -24,7 +24,7 @@ Key Features:
   - Safe defaults, CLI verbosity control, and robust error handling
 
 Dependencies:
-  - Python 3 standard libraries: os, sys, json, hashlib, argparse, re, random, string
+  - Python 3 standard libraries: os, sys, json, hashlib, argparse, re, random, string, logging
   - Third-party: toml, webvtt-py
 
 Example Usage:
@@ -37,6 +37,7 @@ import argparse
 import gc
 import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -50,6 +51,26 @@ import toml
 import torch
 import webvtt
 from sentence_transformers import SentenceTransformer
+
+
+def logger_setup(cfg: dict) -> logging.Logger:
+    """
+    Configure the root logger using settings from a configuration dictionary.
+
+    Looks for the following keys in `cfg`:
+      - "log_level": Logging level as a string (e.g., "INFO", "DEBUG"). Defaults to "INFO".
+      - "log_format": Logging format string. Defaults to "%(asctime)s %(levelname)s %(name)s: %(message)s".
+
+    Initializes basic logging configuration and returns a logger instance
+    for the calling module.
+
+    :param cfg: Dictionary containing logging configuration
+    :return: Configured logger instance
+    """
+    log_level = cfg.get("log_level", "INFO")
+    log_format = cfg.get("log_format", "%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(format=log_format, level=log_level)
+    return logging.getLogger(__name__)
 
 
 def load_global_config(path: str) -> Dict[str, Any]:
@@ -400,7 +421,7 @@ def main() -> int:
               - webvtt-py
               - toml (for config parsing)
               - sentence_transformers
-              - hashlib, json, os, sys (standard library)
+              - hashlib, json, os, sys, argparse, logging (standard library)
 
             Usage Examples:
               python yatsee_slice_vtt.py -e defined_entity --create-txt
@@ -435,25 +456,34 @@ def main() -> int:
             global_cfg = load_global_config(args.config)
             entity_cfg = load_entity_config(global_cfg, args.entity)
         except Exception as e:
-            print(f"❌ Config load failed: {e}", file=sys.stderr)
+            logging.error("Config load failed: %s", e)
             return 1
     else:
         # Require input if no entity is provided
         if not args.vtt_input:
-            print("❌ Without --entity, --vtt-input must be defined", file=sys.stderr)
+            logging.error("Without --entity, --vtt-input must be defined")
             return 1
+
+    # Set up custom logger
+    logger = logger_setup(global_cfg.get("system", {}))
+
+    # Adjust logger level for quiet mode
+    if args.quiet:
+        logger.setLevel(logging.WARNING)
+    else:
+        logger.setLevel(logging.INFO)
 
     # Determine input/output directory based on entity or CLI override
     input_dir = args.vtt_input or os.path.join(entity_cfg["data_path"], f"transcripts_{entity_cfg.get('transcription_model', 'small')}")
     vtt_files_list = discover_files(input_dir, ".vtt")
     if not vtt_files_list:
-        print("↪ No vtt input files found", file=sys.stderr)
+        logger.info("No vtt input files found")
         return 0
 
     # By default, output directory is the same as the input directory
     output_directory = args.vtt_input or os.path.join(entity_cfg["data_path"], f"transcripts_{entity_cfg.get('transcription_model', 'small')}")
     if not os.path.isdir(output_directory):
-        print(f"✓ Output directory will be created: {output_directory}", file=sys.stderr)
+        logger.info("Output directory will be created: %s", output_directory)
         os.makedirs(output_directory, exist_ok=True)
 
     download_tracker = os.path.join(entity_cfg["data_path"], "downloads", ".downloaded")
@@ -463,6 +493,7 @@ def main() -> int:
     # Validate device for SentenceTransformer
     # -----------------------------------------
     if torch.cuda.is_available() and args.device in ["auto", "cuda"]:
+        logger.debug("Cleared GPU cache")
         clear_gpu_cache()
         device = "cuda"
     elif torch.backends.mps.is_available() and args.device in ["auto", "mps"]:
@@ -470,9 +501,9 @@ def main() -> int:
         device = "mps"
     else:
         if args.device == "cuda":
-            print("⚠️ CUDA requested but not available, falling back to CPU.", file=sys.stderr)
+            logger.warning("CUDA requested but not available, falling back to CPU.")
         if args.device == "mps":
-            print("⚠️ MPS requested but not available, falling back to CPU.", file=sys.stderr)
+            logger.warning("MPS requested but not available, falling back to CPU.")
         device = "cpu"
 
     # Only create the jsonl if using embeddings
@@ -481,7 +512,7 @@ def main() -> int:
         or entity_cfg.get("embedding_model")
         or global_cfg.get("system", {}).get("default_embedding_model", "BAAI/bge-small-en-v1.5")
     )
-    print(f"⚡ Loading SentenceTransformer model {embedding_model}...")
+    logger.info("Loading SentenceTransformer model %s...", embedding_model)
     embedder = SentenceTransformer(embedding_model, device=device)
 
     # -----------------------------------------
@@ -495,15 +526,14 @@ def main() -> int:
         video_id = id_map.get(match.group(1).lower()) if match else None
         if not video_id:
             video_id = generate_placeholder_id(base_name)
-            if not args.quiet:
-                print(f"⚠ Placeholder ID for {base_name}: {video_id}")
+            logger.warning("Placeholder ID for %s: %s", base_name, video_id)
 
         try:
             cues = read_vtt(vtt_file)
             if not cues:
                 raise ValueError("No cues found in VTT")
         except (OSError, webvtt.errors.MalformedFileError, ValueError) as e:
-            print(f"❌ Failed to read VTT '{vtt_file}': {e}", file=sys.stderr)
+            logger.error("Failed to read VTT '%s': %s", vtt_file, e)
             continue
 
         # Write TXT transcript always
@@ -511,14 +541,12 @@ def main() -> int:
         try:
             if not os.path.exists(txt_path) or args.force:
                 txt_segments = consolidate_sentences(cues, max_window=args.max_window)
-
                 write_txt(txt_segments, txt_path)
-                if not args.quiet:
-                    print(f"✓ Wrote {txt_path}")
-            elif not args.quiet:
-                print(f"ℹ Skipped (exists): {txt_path}")
+                logger.info("Wrote TXT transcript: %s", txt_path)
+            else:
+                logger.info("Skipped existing TXT transcript: %s", txt_path)
         except OSError as e:
-            print(f"❌ Failed to write TXT '{txt_path}': {e}", file=sys.stderr)
+            logger.error("Failed to write TXT '%s': %s", txt_path, e)
 
         # Write JSONL if selected
         if args.gen_embed:
@@ -536,15 +564,14 @@ def main() -> int:
                     embeddings = embedder.encode(texts, batch_size=32, normalize_embeddings=True, show_progress_bar=not args.quiet).tolist()
                     if len(embeddings) != len(jsonl_segments):
                         raise RuntimeError(
-                            f"Embedding/Segment count mismatch: E:{len(embeddings)} vs S:{len(jsonl_segments)}")
-
+                            f"Embedding/Segment count mismatch: E:{len(embeddings)} vs S:{len(jsonl_segments)}"
+                        )
                     write_jsonl(jsonl_segments, jsonl_path, base_name, video_id, embeddings)
-                    if not args.quiet:
-                        print(f"✓ Wrote {jsonl_path} ({len(jsonl_segments)} segments)")
-                elif not args.quiet:
-                    print(f"ℹ Skipped (exists): {jsonl_path}")
-            except (OSError, ValueError) as e:
-                print(f"❌ Failed to generate/write segments for '{vtt_file}': {e}", file=sys.stderr)
+                    logger.info("Wrote JSONL: %s (%d segments)", jsonl_path, len(jsonl_segments))
+                else:
+                    logger.info("Skipped existing JSONL: %s", jsonl_path)
+            except (OSError, ValueError, RuntimeError) as e:
+                logger.error("Failed to generate/write segments for '%s': %s", vtt_file, e)
 
     return 0
 

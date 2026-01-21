@@ -28,7 +28,7 @@ Key Features:
   - CLI interface for entity selection, model specification, and indexing options
 
 Dependencies:
-  - Python 3 standard libraries: os, sys, json, re, argparse
+  - Python 3 standard libraries: os, sys, json, re, argparse, logging
   - Third-party: chromadb, numpy, spacy, toml, sentence_transformers, tqdm
 
 Example Usage:
@@ -42,6 +42,7 @@ Example Usage:
 import argparse
 import gc
 import json
+import logging
 import os
 import re
 import sys
@@ -56,6 +57,27 @@ import torch
 import toml
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
+
+
+def logger_setup(cfg: dict) -> logging.Logger:
+    """
+    Configure the root logger using settings from a configuration dictionary.
+
+    Looks for the following keys in `cfg`:
+      - "log_level": Logging level as a string (e.g., "INFO", "DEBUG"). Defaults to "INFO".
+      - "log_format": Logging format string. Defaults to "%(asctime)s %(levelname)s %(name)s: %(message)s".
+
+    Initializes basic logging configuration and returns a logger instance
+    for the calling module.
+
+    :param cfg: Dictionary containing logging configuration
+    :return: Configured logger instance
+    """
+    log_level = cfg.get("log_level", "INFO")
+    log_format = cfg.get("log_format", "%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(format=log_format, level=log_level)
+    return logging.getLogger(__name__)
+
 
 def load_global_config(path: str) -> Dict[str, Any]:
     """
@@ -279,7 +301,7 @@ def index_summaries(files: list, nlp_model, embedder, collection, id_map: dict, 
     """
     total_indexed = 0
 
-    for path in tqdm(files, desc="Indexing summaries"):
+    for path in tqdm(files, desc="Indexing summaries", file=sys.stdout, disable=not sys.stdout.isatty()):
         filename = os.path.basename(path)
         base_meta = parse_metadata(filename, "summary", id_map)
         ids, docs, metas = [], [], []
@@ -330,7 +352,7 @@ def index_transcripts(files: list, nlp_model, embedder, collection, id_map: dict
     """
     total_indexed = 0
 
-    for path in tqdm(files, desc="Indexing transcripts"):
+    for path in tqdm(files, desc="Indexing transcripts", file=sys.stdout, disable=not sys.stdout.isatty()):
         filename = os.path.basename(path)
         base_meta = parse_metadata(filename, "raw_transcript", id_map)
         ids, docs, metas = [], [], []
@@ -413,7 +435,7 @@ def main() -> int:
               - toml
               - sentence_transformers
               - tqdm
-              - os, sys, json, re, argparse (standard library)
+              - os, sys, json, re, argparse, logging (standard library)
 
             Usage Examples:
               python yatsee_indexer.py -e defined_entity
@@ -447,13 +469,17 @@ def main() -> int:
             global_cfg = load_global_config(args.config)
             entity_cfg = load_entity_config(global_cfg, args.entity)
         except Exception as e:
-            print(f"❌ Config load failed: {e}", file=sys.stderr)
+            logging.error("Config load failed: %s", e)
             return 1
+
+    # Set up custom logger
+    logger = logger_setup(global_cfg.get("system", {}))
 
     # -----------------------------------------
     # Validate device for SentenceTransformer
     # -----------------------------------------
     if torch.cuda.is_available() and args.device in ["auto", "cuda"]:
+        logger.debug("Cleared GPU cache")
         clear_gpu_cache()
         device = "cuda"
     elif torch.backends.mps.is_available() and args.device in ["auto", "mps"]:
@@ -461,9 +487,9 @@ def main() -> int:
         device = "mps"
     else:
         if args.device == "cuda":
-            print("⚠️ CUDA requested but not available, falling back to CPU.", file=sys.stderr)
+            logger.warning("CUDA requested but not available, falling back to CPU.")
         if args.device == "mps":
-            print("⚠️ MPS requested but not available, falling back to CPU.", file=sys.stderr)
+            logger.warning("MPS requested but not available, falling back to CPU.")
         device = "cpu"
 
     # Only create the jsonl if using embeddings
@@ -472,7 +498,7 @@ def main() -> int:
         or entity_cfg.get("embedding_model")
         or global_cfg.get("system", {}).get("default_embedding_model", "BAAI/bge-small-en-v1.5")
     )
-    print(f"⚡ Loading SentenceTransformer model {embedding_model}...")
+    logger.info("Loading SentenceTransformer model %s...", embedding_model)
     embedder = SentenceTransformer(embedding_model, device=device)
 
     # Load spaCy model
@@ -482,23 +508,19 @@ def main() -> int:
         or global_cfg.get("system", {}).get("default_sentence_model", "en_core_web_sm")
     )
     if not spacy_model_name:
-        print("❌ No spaCy model specified from CLI, entity config, or system config.", file=sys.stderr)
+        logger.error("No spaCy model specified from CLI, entity config, or system config.")
         return 1
 
     try:
         spacy_model = spacy.load(spacy_model_name)
-        print(f"✓ Using spaCy model: {spacy_model_name}")
+        logger.info("Using spaCy model: %s", spacy_model_name)
     except OSError:
-        print(
-            f"❌ spaCy model '{spacy_model_name}' not found. Install with: "
-            f"python -m spacy download {spacy_model_name}",
-            file=sys.stderr
-        )
+        logger.error("spaCy model '%s' not found. Install with: python -m spacy download %s",spacy_model_name, spacy_model_name)
         return 1
 
     download_tracker = os.path.join(entity_cfg["data_path"], "downloads", ".downloaded")
     id_map = load_video_id_map(download_tracker)
-    print(f"🗺️ Loaded {len(id_map)} video IDs")
+    logger.info("Loaded %d video IDs", len(id_map))
 
     chroma_path = os.path.join(entity_cfg["data_path"], "yatsee_db")
     client = chromadb.PersistentClient(path=chroma_path)
@@ -511,10 +533,10 @@ def main() -> int:
     summary_dir = os.path.join(entity_cfg["data_path"], global_cfg["models"][entity_cfg["summarization_model"]]["append_dir"])
     summary_files = discover_files(summary_dir,".md")
     if not summary_files:
-        print(f"❌ Summary directory does not exist: {summary_dir}", file=sys.stderr)
+        logger.error("Summary directory does not exist: %s", summary_dir)
         return 1
 
-    print(f"📚 Indexing {len(summary_files)} summaries")
+    logger.info("Indexing %d summaries", len(summary_files))
     num_summaries = index_summaries(
         summary_files,
         spacy_model,
@@ -533,16 +555,16 @@ def main() -> int:
     segment_files = discover_files(segments_dir, ".jsonl")
     if not segment_files:
         segments_dir = ""
-        print("↪ No JSONL segments found", file=sys.stderr)
+        logger.warning("No JSONL segments found in %s", segments_dir)
 
     # Determine input/output directory based on entity or CLI override
     transcript_dir = os.path.join(entity_cfg["data_path"], "normalized")
     transcript_files = discover_files(transcript_dir, ".txt")
     if not transcript_files:
-        print(f"❌ Transcript directory does not exist: {transcript_dir}", file=sys.stderr)
+        logger.error("Transcript directory does not exist: %s", transcript_dir)
         return 1
 
-    print(f"🎙️ Indexing {len(transcript_files)} transcripts")
+    logger.info("Indexing %d transcripts", len(transcript_files))
     num_transcripts = index_transcripts(
         transcript_files,
         spacy_model,
@@ -555,8 +577,8 @@ def main() -> int:
         segments_dir=segments_dir
     )
 
-    print(f"\n✅ Indexing complete: {num_summaries} summaries, {num_transcripts} transcripts")
-    print(f"DB located at: {chroma_path}")
+    logger.info("Indexing complete: %d summaries, %d transcripts", num_summaries, num_transcripts)
+    logger.info("DB located at: %s", chroma_path)
 
     return 0
 

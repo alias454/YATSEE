@@ -33,6 +33,7 @@ Idempotency:
 
 # Standard library
 import argparse
+import logging
 import os
 import random
 import re
@@ -46,6 +47,27 @@ from typing import Any, Dict, List, Optional
 import json
 import toml
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError, ExtractorError
+
+
+def logger_setup(cfg: dict) -> logging.Logger:
+    """
+    Configure the root logger using settings from a configuration dictionary.
+
+    Looks for the following keys in `cfg`:
+      - "log_level": Logging level as a string (e.g., "INFO", "DEBUG"). Defaults to "INFO".
+      - "log_format": Logging format string. Defaults to "%(asctime)s %(levelname)s %(name)s: %(message)s".
+
+    Initializes basic logging configuration and returns a logger instance
+    for the calling module.
+
+    :param cfg: Dictionary containing logging configuration
+    :return: Configured logger instance
+    """
+    log_level = cfg.get("log_level", "INFO")
+    log_format = cfg.get("log_format", "%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(format=log_format, level=log_level)
+    return logging.getLogger(__name__)
 
 
 def load_global_config(path: str) -> Dict[str, Any]:
@@ -112,66 +134,65 @@ def clean_downloaded_file(video_id: str, output_dir: str) -> str:
     - Avoids overwriting existing files
     - Resolves collisions with numeric suffixes
 
-    Returns empty string if no matching file is found.
-
     :param video_id: Prefix of the downloaded file to locate
     :param output_dir: Directory where downloaded files reside
-    :return: Sanitized filename in output_dir, or "" if not found
+    :return: Sanitized filename in output_dir, or empty string if not found
+    :raises OSError: On filesystem failures (e.g., rename, scan)
     """
-    try:
-        # Scan directory for first file starting with video_id
-        original = None
-        with os.scandir(output_dir) as entries:
-            for entry in entries:
-                if entry.is_file() and entry.name.startswith(video_id):
-                    original = entry.name
-                    break
+    # Scan directory for first file starting with video_id
+    original = None
+    with os.scandir(output_dir) as entries:
+        for entry in entries:
+            if entry.is_file() and entry.name.startswith(video_id):
+                original = entry.name
+                break
 
-        if not original:
-            # No file found for this video ID
-            return ""
-
-        # Normalize filename: lowercase, safe chars only, collapse multiple underscores
-        cleaned = original.lower()
-        cleaned = re.sub(r"[\"'‘’“”⧸]", "_", cleaned)
-        cleaned = re.sub(r"[^a-z0-9._-]", "_", cleaned)
-        cleaned = re.sub(r"_-_", "_", cleaned)
-        cleaned = re.sub(r"__+", "_", cleaned)
-
-        # Rename only if the sanitized filename differs
-        if cleaned != original:
-            original_path = os.path.join(output_dir, original)
-            cleaned_path = os.path.join(output_dir, cleaned)
-
-            if not os.path.exists(cleaned_path):
-                # Safe rename
-                os.rename(original_path, cleaned_path)
-            else:
-                # Resolve collisions by appending incremental suffix
-                base, ext = os.path.splitext(cleaned)
-                counter = 1
-                while os.path.exists(os.path.join(output_dir, f"{base}_{counter}{ext}")):
-                    counter += 1
-                cleaned = f"{base}_{counter}{ext}"
-                os.rename(original_path, os.path.join(output_dir, cleaned))
-
-        return cleaned
-
-    except Exception as exc:
-        # Only log for CLI visibility; function returns "" to signal failure
-        print(f"❌ Failed to clean file for {video_id}: {exc}")
+    if not original:
+        # No file found for this video ID
         return ""
 
+    # Normalize filename: lowercase, safe chars only, collapse multiple underscores
+    cleaned = original.lower()
+    cleaned = re.sub(r"[\"'‘’“”⧸]", "_", cleaned)
+    cleaned = re.sub(r"[^a-z0-9._-]", "_", cleaned)
+    cleaned = re.sub(r"_-_", "_", cleaned)
+    cleaned = re.sub(r"__+", "_", cleaned)
 
-def load_cached_playlist(path: str, max_age_seconds: int) -> list[str] | None:
+    # Rename only if the sanitized filename differs
+    if cleaned == original:
+        return cleaned
+
+    original_path = os.path.join(output_dir, original)
+    cleaned_path = os.path.join(output_dir, cleaned)
+
+    if not os.path.exists(cleaned_path):
+        os.rename(original_path, cleaned_path)
+        return cleaned
+
+    # Resolve collisions
+    base, ext = os.path.splitext(cleaned)
+    counter = 1
+    while True:
+        candidate = f"{base}_{counter}{ext}"
+        candidate_path = os.path.join(output_dir, candidate)
+        if not os.path.exists(candidate_path):
+            os.rename(original_path, candidate_path)
+            return candidate
+        counter += 1
+
+
+def load_cached_playlist(path: str, max_age_seconds: int) -> Optional[list[str]]:
     """
     Load a playlist cache file if it exists and is recent enough.
 
-    Returns None if cache is missing, corrupted, or too old.
+    Returns None if the cache is missing, invalid, or expired.
 
-    :param path: Path to the cache file
-    :param max_age_seconds: Maximum allowed age of cache
-    :return: List of video IDs if valid, else None
+    Args:
+        path: Path to the cache file.
+        max_age_seconds: Maximum allowed cache age in seconds.
+
+    Returns:
+        A list of video IDs if the cache is valid, otherwise None.
     """
     if not os.path.exists(path):
         return None
@@ -179,22 +200,22 @@ def load_cached_playlist(path: str, max_age_seconds: int) -> list[str] | None:
     try:
         with open(path, "r", encoding="utf-8") as f:
             payload = json.load(f)
-    except Exception as exc:
-        print(f"⚠️ Failed to read cache file '{path}': {exc}")
+    except (OSError, json.JSONDecodeError):
         return None
 
     fetched_at = payload.get("fetched_at")
     video_ids = payload.get("video_ids")
 
-    if not isinstance(fetched_at, (int, float)) or not isinstance(video_ids, list):
+    if not isinstance(fetched_at, (int, float)):
         return None
 
-    age = time.time() - fetched_at
-    if age > max_age_seconds:
+    if not isinstance(video_ids, list):
         return None
 
-    # Ensure all IDs are strings
-    return [str(vid) for vid in video_ids if vid]
+    if time.time() - fetched_at > max_age_seconds:
+        return None
+
+    return [str(vid) for vid in video_ids if isinstance(vid, (str, int))]
 
 
 def save_cached_playlist(path: str, channel: str, video_ids: list[str]) -> None:
@@ -217,8 +238,8 @@ def save_cached_playlist(path: str, channel: str, video_ids: list[str]) -> None:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-    except Exception as exc:
-        print(f"❌ Failed to save cache file '{path}': {exc}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to save cache file '{path}': {e}") from e
 
 
 def get_video_ids(youtube_path: str) -> List[str]:
@@ -262,9 +283,17 @@ def get_video_upload_date(video_id: str, js_runtime: str = "deno") -> Optional[s
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            return info.get("upload_date")
-    except Exception:
+    except (DownloadError, ExtractorError):
         return None
+    except OSError:
+        # subprocess / runtime / filesystem weirdness
+        return None
+
+    upload_date = info.get("upload_date")
+    if isinstance(upload_date, str):
+        return upload_date
+
+    return None
 
 
 def get_tracked_ids(tracker_file: str, dry_run: bool = False) -> set[str]:
@@ -391,15 +420,15 @@ def download_audio(video_id: str, output_dir: str, js_runtime: str = "deno", dry
     }
 
 
-def off_peak_warning():
+def off_peak_warning() -> bool:
     """
-    Print a warning if current local hour is outside off-peak (1am-6am).
+    Check whether the current local hour is within the off-peak window (1am–6am).
 
-    Helps avoid heavy network usage during peak hours.
+    Returns:
+        bool: True if within off-peak hours, False otherwise.
     """
     current_hour = datetime.now().hour
-    if not (1 <= current_hour <= 6):
-        print(f"⚠️ Warning: Current hour ({current_hour}) is outside off-peak window (1am-6am).")
+    return 1 <= current_hour <= 6
 
 
 # ----------------------------------------------------------------------
@@ -443,27 +472,31 @@ def main() -> int:
             global_cfg = load_global_config(args.config)
             entity_cfg = load_entity_config(global_cfg, args.entity)
         except Exception as e:
-            print(f"❌ Config load failed: {e}", file=sys.stderr)
+            logging.error("Config load failed: %s", e)
             return 1
     else:
         # Require both input/output if no entity is provided
         if not args.output_dir:
-            print("❌ Without --entity, --output-dir must be defined", file=sys.stderr)
+            logging.error("Without --entity, --output-dir must be defined")
             return 1
 
+    # Set up custom logger
+    logger = logger_setup(global_cfg.get("system", {}))
+
     # Warn if running outside off-peak
-    # off_peak_warning()
+    # if not off_peak_warning():
+    #     logger.warning("Current hour (%s) is outside off-peak window (1am–6am).",datetime.now().hour)
 
     # Use output_dir if specified; else fall back to entity data_path
     data_path = args.output_dir or entity_cfg.get("data_path")
     if not data_path:
-        print("❌ No valid data path found", file=sys.stderr)
+        logger.error("No valid data path found")
         return 1
 
     # Ensure output directory exists
     output_dir = args.output_dir or os.path.join(data_path, "downloads")
     if not os.path.isdir(output_dir) and not args.dry_run:
-        print(f"✓ Output directory will be created: {output_dir}", file=sys.stderr)
+        logger.info("Output directory will be created: %s", output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
     # Read existing tracker file for idempotent file management
@@ -484,7 +517,7 @@ def main() -> int:
     else:
         youtube_path = youtube_source
     if not youtube_path:
-        print("❌ Missing YouTube source path", file=sys.stderr)
+        logger.error("Missing YouTube source path")
         return 1
 
     # Create cache file for video ID
@@ -494,15 +527,16 @@ def main() -> int:
     cache_file = os.path.join(output_dir, ".playlist_ids.json")
     video_ids = load_cached_playlist(cache_file, CACHE_MAX_AGE)
     if video_ids is None:
+        logger.info("Playlist cache missing, invalid, or expired. Rebuilding.")
         video_ids = get_video_ids(youtube_path)
         save_cached_playlist(cache_file, youtube_path, video_ids)
 
-    print(f"Downloaded {len(tracked_ids)} of {len(video_ids)} resolved video IDs from {youtube_path}")
+    logger.info("Downloaded %d of %d resolved video IDs from %s",len(tracked_ids), len(video_ids), youtube_path)
     if args.dry_run:
-        print("Dry run: exiting before download operations.")
+        logger.info("Dry run enabled; exiting before download operations")
         return 0
     if args.make_playlist:
-        print(f"✅ Playlist cache created for {youtube_path}; exiting.")
+        logger.info("Playlist cache created for %s; exiting", youtube_path)
         return 0
 
     # DATEAFTER =${2: -$(date - d "-90 day" + %Y %m %d)}
@@ -520,20 +554,20 @@ def main() -> int:
     # Loop through the list of IDs to process
     for video_id in video_ids:
         if video_id in tracked_ids:
-            print(f"✓ Skipping {video_id} (already processed)")
+            logger.debug("Skipping %s (already processed)", video_id)
             continue
 
         upload_date = get_video_upload_date(video_id, js_runtime=js_runtime)
         if not upload_date:
-            print(f"⚠️ Skipping {video_id} (no upload date)")
+            logger.warning("Skipping %s (no upload date)", video_id)
             continue
 
         if date_before and upload_date > date_before:
-            print(f"⚠️ Skipping {video_id} (upload date in the future: {upload_date})")
+            logger.warning("Skipping %s (upload date in the future: %s)",video_id, upload_date)
             continue
 
         if date_after and upload_date < date_after:
-            print(f"🛑 Reached cutoff date with {video_id} ({upload_date}), stopping")
+            logger.info("Reached cutoff date with %s (%s); stopping",video_id, upload_date)
             break
 
         # We made it here so we can download the audio
@@ -543,11 +577,11 @@ def main() -> int:
             if cleaned_file:
                 with open(tracker_file, "a", encoding="utf-8") as fh:
                     fh.write(video_id + "\n")
-
-            print(f"Downloaded and cleaned: {cleaned_file}")
-
+                    logger.info("Downloaded and cleaned: %s", cleaned_file)
+            else:
+                logger.warning("Downloaded file for %s not found after download", video_id)
         else:
-            print(result)
+            logger.error("Download failed: %s", result)
 
     return 0
 

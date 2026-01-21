@@ -43,16 +43,37 @@ Design Notes:
 # Standard library
 import argparse
 import hashlib
+import logging
 import os
 import subprocess
 import sys
 import textwrap
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 # Third-party imports
 import toml
 
 SUPPORTED_INPUT_EXTENSIONS = (".m4a", ".mp4", ".webm")
+
+
+def logger_setup(cfg: dict) -> logging.Logger:
+    """
+    Configure the root logger using settings from a configuration dictionary.
+
+    Looks for the following keys in `cfg`:
+      - "log_level": Logging level as a string (e.g., "INFO", "DEBUG"). Defaults to "INFO".
+      - "log_format": Logging format string. Defaults to "%(asctime)s %(levelname)s %(name)s: %(message)s".
+
+    Initializes basic logging configuration and returns a logger instance
+    for the calling module.
+
+    :param cfg: Dictionary containing logging configuration
+    :return: Configured logger instance
+    """
+    log_level = cfg.get("log_level", "INFO")
+    log_format = cfg.get("log_format", "%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(format=log_format, level=log_level)
+    return logging.getLogger(__name__)
 
 
 def load_global_config(path: str) -> Dict[str, Any]:
@@ -188,7 +209,7 @@ def discover_files(input_path: str, supported_exts) -> List[str]:
     return sorted(files)
 
 
-def get_audio_duration(input_file: str)-> tuple[bool, float | None, str]:
+def get_audio_duration(input_file: str)-> tuple[bool, Optional[float], str]:
     """
     Determine the duration of an audio file in seconds using ffprobe.
 
@@ -348,32 +369,35 @@ def main() -> int:
             global_cfg = load_global_config(args.config)
             entity_cfg = load_entity_config(global_cfg, args.entity)
         except Exception as e:
-            print(f"❌ Config load failed: {e}", file=sys.stderr)
+            logging.error("Config load failed: %s", e)
             return 1
     else:
         # Require both input/output if no entity is provided
         if not args.input_dir or not args.output_dir:
-            print("❌ Without --entity, both --input-dir and --output-dir must be defined", file=sys.stderr)
+            logging.error("Without --entity, both --input-dir and --output-dir must be defined")
             return 1
+
+    # Set up custom logger
+    logger = logger_setup(global_cfg.get("system", {}))
 
     # Use input_dir if specified; else fall back to entity data_path
     downloads_path = args.input_dir or os.path.join(entity_cfg.get("data_path"), "downloads")
     input_files = discover_files(downloads_path, SUPPORTED_INPUT_EXTENSIONS)
     if not input_files:
-        print("↪ No input files found", file=sys.stderr)
+        logger.info("No input files found at %s", downloads_path)
         return 0
 
-    print(f"🔍 Discovered {len(input_files)} files to convert.")
+    logger.info("Discovered %d files to convert in %s", len(input_files), downloads_path)
 
     audio_out = args.output_dir or os.path.join(entity_cfg.get("data_path"), "audio")
     if not os.path.isdir(audio_out) and not args.dry_run:
-        print(f"✓ Output directory will be created: {audio_out}", file=sys.stderr)
+        logger.info("Output directory will be created: %s", audio_out)
         os.makedirs(audio_out, exist_ok=True)
 
     # Transcription processes see a quality improvement when large audio files are chunked
     chunk_root_dir = os.path.join(audio_out, "chunks")
     if not os.path.isdir(chunk_root_dir) and args.create_chunks:
-        print(f"✓ Chunk root directory will be created: {chunk_root_dir}", file=sys.stderr)
+        logger.info("Chunk root directory will be created: %s", chunk_root_dir)
         os.makedirs(chunk_root_dir, exist_ok=True)
 
     converted_hashes: Set[str] = set()
@@ -388,18 +412,17 @@ def main() -> int:
         file_hash = compute_sha256(src_path)
 
         if file_hash in converted_hashes and not args.force:
-            print(f"[{idx}/{len(input_files)}] Skipping already converted: {src_path}")
+            logger.debug("[%d/%d] Skipping already converted: %s", idx, len(input_files), src_path)
             continue
 
         base_name = os.path.splitext(os.path.basename(src_path))[0]
         out_path = os.path.join(audio_out, f"{base_name}.{args.format}")
 
-        print(f"[{idx}/{len(input_files)}] Converting: {src_path} → {out_path}")
+        logger.info("[%d/%d] Converting: %s → %s", idx, len(input_files), src_path, out_path)
 
         if args.dry_run:
-            print("  ↪ dry-run: ffmpeg not executed, state not written")
+            logger.info("↪ dry-run: ffmpeg not executed, state not written")
             continue
-
         try:
             # -----------------------------------------
             # Convert audio to flac or wav
@@ -415,12 +438,12 @@ def main() -> int:
                 # Ensure output directory exists for chunks
                 chunk_out_path = os.path.join(chunk_root_dir, f"{base_name}")
                 if not os.path.isdir(chunk_out_path):
-                    print(f"✓ Chunk file directory will be created: {chunk_out_path}", file=sys.stderr)
+                    logger.info("✓ Chunk file directory will be created: %s", chunk_out_path)
                     os.makedirs(chunk_out_path, exist_ok=True)
 
                 success, total_duration, msg = get_audio_duration(out_path)
                 if not success or total_duration is None:
-                    print(f"❌ {msg}", file=sys.stderr)
+                    logger.error(msg)
                     continue
 
                 chunk_success, chunks, chunk_msg = chunk_audio_file(
@@ -431,22 +454,21 @@ def main() -> int:
                     overlap=args.chunk_overlap
                 )
                 if chunk_success:
-                    print(f"✓ Created {len(chunks)} chunk files", file=sys.stderr)
+                    logger.info("✓ Created %d chunk files", len(chunks))
                 else:
-                    print(f"❌ Chunking failed: {chunk_msg}", file=sys.stderr)
+                    logger.error("Chunking failed: %s", chunk_msg)
 
             if not format_success:
-                print(f"❌ Conversion failed: {src_path}, skipping", file=sys.stderr)
+                logger.error("Conversion failed: %s, skipping", src_path)
                 continue
 
             # Record successful conversion
             with open(hash_tracker, "a", encoding="utf-8") as tracker:
                 tracker.write(file_hash + "\n")
 
-            print(f"✓ {format_msg}")
-        except Exception as e:
-            # Only log unexpected exceptions, don't stop the whole script
-            print(f"❌ Unexpected error converting {src_path}: {e}", file=sys.stderr)
+            logger.info("✓ %s", format_msg)
+        except Exception:
+            logger.exception("Unexpected error converting %s", src_path)
             continue
 
     return 0
