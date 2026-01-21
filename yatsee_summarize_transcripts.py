@@ -51,7 +51,7 @@ Dependencies:
   - Python 3.10+
   - Ollama (local API endpoint)
   - Locally pulled LLMs: llama3, mistral, gemma, etc.
-  - Standard libraries: os, sys, re, argparse, textwrap
+  - Standard libraries: os, sys, re, argparse, textwrap, logging
   - Optional: YAML library for output if using --output-format yaml
 
 Example Usage:
@@ -75,6 +75,7 @@ Example Usage:
 # Standard library
 import argparse
 import json
+import logging
 import os
 import re
 import sys
@@ -136,6 +137,26 @@ def classify_meeting(session: requests.Session, model: str, prompt: str) -> str:
 
     except requests.RequestException as e:
         raise RuntimeError(f"Error during meeting classification request: {e}")
+
+
+def logger_setup(cfg: dict) -> logging.Logger:
+    """
+    Configure the root logger using settings from a configuration dictionary.
+
+    Looks for the following keys in `cfg`:
+      - "log_level": Logging level as a string (e.g., "INFO", "DEBUG"). Defaults to "INFO".
+      - "log_format": Logging format string. Defaults to "%(asctime)s %(levelname)s %(name)s: %(message)s".
+
+    Initializes basic logging configuration and returns a logger instance
+    for the calling module.
+
+    :param cfg: Dictionary containing logging configuration
+    :return: Configured logger instance
+    """
+    log_level = cfg.get("log_level", "INFO")
+    log_format = cfg.get("log_format", "%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(format=log_format, level=log_level)
+    return logging.getLogger(__name__)
 
 
 def load_global_config(path: str) -> Dict[str, Any]:
@@ -711,13 +732,16 @@ def main():
             global_cfg = load_global_config(args.config)
             entity_cfg = load_entity_config(global_cfg, args.entity)
         except Exception as e:
-            print(f"❌ Config load failed: {e}", file=sys.stderr)
+            logging.error("Config load failed: %s", e)
             return 1
     else:
         # Require input if no entity is provided
         if not args.txt_input:
-            print("❌ Without --entity, --txt-input must be defined", file=sys.stderr)
+            logging.error("Without --entity, --txt-input must be defined")
             return 1
+
+    # Set up custom logger
+    logger = logger_setup(global_cfg.get("system", {}))
 
     # ----------------------------
     # Load PROMPTS
@@ -739,7 +763,7 @@ def main():
         CLASSIFIER_PROMPT = _prompts.get("classifier_prompt", {}).get("text", "")
     else:
         # fallback: inline general defaults
-        print(f"⚠️ No prompts found for job type '{args.job_type}', using inline general defaults", file=sys.stderr)
+        logger.warning("No prompts found for job type '%s', using inline general defaults", args.job_type)
         PROMPTS = {
             "overview": "Default overview prompt text...",
             "action_items": "Default action items prompt text..."
@@ -773,7 +797,7 @@ def main():
     )
 
     if not model:
-        print("❌ No model specified. Use --model(-m) or set it in entity/global config.", file=sys.stderr)
+        logger.error("No model specified. Use --model(-m) or set it in entity/global config.")
         return 1
 
     # supported_models = ["mistral:latest", "mistral-nemo:latest", "llama3:latest", "gemma:2b", "qwen2.5:7b-instruct-q4_k_m"]
@@ -783,14 +807,15 @@ def main():
     # Normalize lookup for user input (case-insensitive)
     model_key = next((m for m in model_map if m.lower() == model.lower()), None)
     if not model_key:
-        print(f"❌ Unsupported model '{model}'. Supported: {', '.join(model_map.keys())}.", file=sys.stderr)
+        map_keys = ', '.join(model_map.keys())
+        logger.error("Unsupported model '%s'. Supported: %s",model, map_keys)
         return 1
 
     # --- Resolve input path ---
     input_dir = args.txt_input or os.path.join(entity_cfg.get("data_path"), "normalized")
     file_list = discover_files(input_dir, ".txt", "punct.txt")
     if not input_dir:
-        print("❌ No input file or directory specified. Use --txt-input(-i) or set it in the config.", file=sys.stderr)
+        logger.error("No input file or directory specified. Use --txt-input(-i) or set it in the config.")
         return 0
 
     # --- Resolve output path ---
@@ -798,7 +823,7 @@ def main():
 
     output_dir = args.output_dir or os.path.join(entity_cfg["data_path"], model_cfg["append_dir"])
     if not os.path.isdir(output_dir):
-        print(f"✓ Output directory will be created: {output_dir}", file=sys.stderr)
+        logger.info("Output directory will be created: %s", output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
     # Now model_key matches the exact key in config
@@ -823,7 +848,7 @@ def main():
         token_usage = 0
         output_token_usage = 0
 
-        print(f"🔍 Using model: {model}")
+        logger.info("Using model: %s", model)
         # Base name of the input file
         base_name = os.path.splitext(os.path.basename(file_path))[0]
 
@@ -841,13 +866,13 @@ def main():
                 # track token usage
                 token_usage += estimate_token_count(classifier_prompt)
                 output_token_usage += estimate_token_count(meeting_type)
-                print(f"🧠 Auto-detected meeting type: {meeting_type}")
+                logger.info("Auto-detected meeting type: %s", meeting_type)
 
             first_pass_id = args.first_prompt or PROMPT_LOOKUP.get(meeting_type, PROMPT_LOOKUP["general"])["first"]
             multi_pass_id = args.second_prompt or PROMPT_LOOKUP.get(meeting_type, PROMPT_LOOKUP["general"])["multi"]
             final_pass_id = args.final_prompt or PROMPT_LOOKUP.get(meeting_type, PROMPT_LOOKUP["general"])["final"]
 
-            print(f"🧩 Processing transcript: {base_name}...")
+            logger.info("Processing transcript: %s", base_name)
 
             # Loop to dynamically summarize text, possibly recursively summarizing summaries
             pass_num = 1  # Current pass counter
@@ -863,9 +888,9 @@ def main():
                     chunks = prepare_text_chunk(transcript, int(args.max_tokens / 2), int(args.max_tokens / 6))
                     try:
                         chunk_files = write_chunk_files(chunks, output_dir, meeting_type, base_name)
-                        print(f"✅ Wrote {len(chunk_files)} chunks to {os.path.join(output_dir, 'chunks', meeting_type)}")
+                        logger.info("Wrote %d chunks to %s", len(chunk_files), os.path.join(output_dir, "chunks", meeting_type))
                     except Exception as e:
-                        print(f"❌ Error writing chunk files: {e}")
+                        logger.error("Error writing chunk files: %s", e)
 
                 chunks_only = False
                 if chunks_only:
@@ -879,7 +904,7 @@ def main():
                 count = 0
                 for chunk in chunks:
                     count += 1
-                    print(f"Pass {pass_num} processing chunk {count}/{len(chunks)} with [{prompt_type}]")
+                    logger.info("Pass %d processing chunk %d/%d with prompt [%s]", pass_num, count, len(chunks), prompt_type)
                     # Inject context back into the chunk when operating on large files
                     # The context is in the file but with each chunk the llm looses context so add some back
                     speaker_matches = scan_transcript_for_names(chunk, known_speakers_permutations)
@@ -911,7 +936,7 @@ def main():
                 # If summary is small enough or this is the last pass, finalize and exit loop
                 if pass_num >= 2:
                     if estimate_token_count(summary) <= max_tokens or len(chunk_summaries) == 1 or pass_num == args.max_pass:
-                        print(f"Processing final summary with [{final_pass_id}]")
+                        logger.info("Processing final summary with prompt [%s]", final_pass_id)
                         prompt_template = PROMPTS.get(final_pass_id, PROMPTS["detailed"])
                         final_prompt = prompt_template.format(context=context or "No context provided.", text=summary)
 
@@ -939,9 +964,8 @@ def main():
             estimated_cost = calculate_cost_openai_gpt4o(token_usage, output_token_usage)
 
             # Print token usage and estimated cost for transparency
-            print(f"\n📊 Token usage:")
-            print(f"  - tokIn: {token_usage} tokOut: {output_token_usage} - Total tokens: {total_tokens}")
-            print(f"💰 Estimated GPT-4o API cost: ${estimated_cost:.4f}")
+            logger.info("Token usage: tokIn=%d tokOut=%d total=%d", token_usage, output_token_usage, total_tokens)
+            logger.info("Estimated GPT-4o API cost: $%.4f", estimated_cost)
 
             # ----------------------------
             # Write output files per job type
@@ -950,11 +974,11 @@ def main():
                 final_basename = f"{base_name}.summary"
                 try:
                     summary_file = write_summary_file(final_summary, final_basename, output_dir, args.output_format)
-                    print("\n📝 Final Summary:\n")
-                    print(final_summary)
-                    print(f"✅ Final summary written to: {summary_file}")
+                    logger.debug("\nFinal Summary:\n")
+                    logger.debug(final_summary)
+                    logger.info("Final summary written to: %s\n", summary_file)
                 except Exception as e:
-                    print(f"❌ Failed to write summary file: {e}")
+                    logger.error("Failed to write summary file: %s", e)
             # elif args.job_type == "research":
             #     # Write the final facts gathered to json
             #     final_basename = f"{base_name}.research"
@@ -962,13 +986,13 @@ def main():
             #     final_facts = aggregate_facts_from_chunks(chunk_summaries)
             #     success = write_facts_file(final_facts, final_basename, output_dir)  # writes JSONL or YAML
             #     if success:
-            #         print(f"\n✅ Research facts written to: {os.path.join(output_dir, final_basename)}.jsonl")
+            #         logger.info("Research facts written to: %s", os.path.join(output_dir, final_basename) + ".jsonl")
             #     else:
-            #         print("❌ Failed to write facts file.")
+            #         logger.error("Failed to write research facts file: %s", final_basename)
 
         except Exception as e:
             # Catch and report any errors reading file or processing
-            print(f"❌ Error: {e}")
+            logger.exception("Error processing file '%s': %s", file_path, e)
             return 1
 
     return 0

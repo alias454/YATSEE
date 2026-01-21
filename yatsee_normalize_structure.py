@@ -26,7 +26,7 @@ Key Features:
   - Safe defaults, CLI verbosity, and force-overwrite support
 
 Dependencies:
-  - Python 3 standard libraries: os, sys, re, argparse, typing
+  - Python 3 standard libraries: os, sys, re, argparse, typing, logging
   - Third-party: spaCy, toml
 
 Example Usage:
@@ -37,6 +37,7 @@ Example Usage:
 
 # Standard library
 import argparse
+import logging
 import os
 import re
 import sys
@@ -46,6 +47,26 @@ from typing import Any, Dict, List, Optional
 # Third-party imports
 import spacy
 import toml
+
+
+def logger_setup(cfg: dict) -> logging.Logger:
+    """
+    Configure the root logger using settings from a configuration dictionary.
+
+    Looks for the following keys in `cfg`:
+      - "log_level": Logging level as a string (e.g., "INFO", "DEBUG"). Defaults to "INFO".
+      - "log_format": Logging format string. Defaults to "%(asctime)s %(levelname)s %(name)s: %(message)s".
+
+    Initializes basic logging configuration and returns a logger instance
+    for the calling module.
+
+    :param cfg: Dictionary containing logging configuration
+    :return: Configured logger instance
+    """
+    log_level = cfg.get("log_level", "INFO")
+    log_format = cfg.get("log_format", "%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(format=log_format, level=log_level)
+    return logging.getLogger(__name__)
 
 
 def load_global_config(path: str) -> Dict[str, Any]:
@@ -439,26 +460,29 @@ def main() -> int:
             global_cfg = load_global_config(args.config)
             entity_cfg = load_entity_config(global_cfg, args.entity)
         except Exception as e:
-            print(f"❌ Config load failed: {e}", file=sys.stderr)
+            logging.error("Config load failed: %s", e)
             return 1
     else:
         # Require input if no entity is provided
         if not args.input_dir:
-            print("❌ Without --entity, --input-dir must be defined", file=sys.stderr)
+            logging.error("Without --entity, --input-dir must be defined")
             return 1
+
+    # Set up custom logger
+    logger = logger_setup(global_cfg.get("system", {}))
 
     # Determine input/output directory based on entity or CLI override
     append_dir = args.input_dir or entity_cfg.get("transcription_model", "small")
     input_dir = args.input_dir or os.path.join(entity_cfg["data_path"], f'transcripts_{append_dir}')
     file_list = discover_files(input_dir, ".txt")
     if not file_list:
-        print("↪ No .txt input files found", file=sys.stderr)
+        logger.info("No .txt input files found")
         return 0
 
     # By default, output directory is the normalized directory
     output_directory = args.output_dir or os.path.join(entity_cfg["data_path"], 'normalized')
     if not os.path.isdir(output_directory):
-        print(f"✓ Output directory will be created: {output_directory}", file=sys.stderr)
+        logger.info("Output directory will be created: %s", output_directory)
         os.makedirs(output_directory, exist_ok=True)
 
     # ----------------------------
@@ -472,18 +496,14 @@ def main() -> int:
             or global_cfg.get("system", {}).get("default_sentence_model", "en_core_web_sm")
         )
         if not spacy_model_name:
-            print("❌ No spaCy model specified from CLI, entity config, or system config.", file=sys.stderr)
+            logger.error("No spaCy model specified from CLI, entity config, or system config.")
             return 1
 
         try:
             spacy_model = spacy.load(spacy_model_name)
-            print(f"✓ Using spaCy model: {spacy_model_name}")
+            logger.info("Using spaCy model: %s", spacy_model_name)
         except OSError:
-            print(
-                f"❌ spaCy model '{spacy_model_name}' not found. Install with: "
-                f"python -m spacy download {spacy_model_name}",
-                file=sys.stderr
-            )
+            logger.error("spaCy model '%s' not found. Install with: python -m spacy download %s",spacy_model_name, spacy_model_name)
             return 1
 
     # Load replacements from flattened entity config
@@ -495,12 +515,13 @@ def main() -> int:
         output_file = os.path.join(output_directory, filename)
 
         if os.path.isfile(output_file) and not args.force:
-            print(f"↪ Skipping existing: {output_file}")
+            logger.info("Skipping existing file: %s", output_file)
             continue
 
         # Read, normalize, split, limit repetitions, and apply replacements
         with open(file_path, "r", encoding="utf-8") as f:
             raw_text = f.read()
+            logger.debug("Read %d characters from %s", len(raw_text), filename)
 
         normalized = normalize_text(raw_text, deep=args.deep_clean)
         normalized = capitalize_sentences(normalized)
@@ -511,7 +532,7 @@ def main() -> int:
         # Write output
         with open(output_file, "w", encoding="utf-8") as f:
             f.write(processed)
-            print(f"✓ Processed: {output_file}")
+            logger.info("Processed file: %s", output_file)
 
     return 0
 

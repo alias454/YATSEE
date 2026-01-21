@@ -48,6 +48,7 @@ import argparse
 import gc
 import hashlib
 import importlib.util
+import logging
 import os
 import sys
 import textwrap
@@ -71,6 +72,26 @@ warnings.filterwarnings("ignore", category=UserWarning, message="torchaudio._bac
 HAS_FASTER_WHISPER = importlib.util.find_spec("faster_whisper") is not None
 
 SUPPORTED_INPUT_EXTENSIONS = (".mp3", ".wav", ".flac", ".m4a")
+
+
+def logger_setup(cfg: dict) -> logging.Logger:
+    """
+    Configure the root logger using settings from a configuration dictionary.
+
+    Looks for the following keys in `cfg`:
+      - "log_level": Logging level as a string (e.g., "INFO", "DEBUG"). Defaults to "INFO".
+      - "log_format": Logging format string. Defaults to "%(asctime)s %(levelname)s %(name)s: %(message)s".
+
+    Initializes basic logging configuration and returns a logger instance
+    for the calling module.
+
+    :param cfg: Dictionary containing logging configuration
+    :return: Configured logger instance
+    """
+    log_level = cfg.get("log_level", "INFO")
+    log_format = cfg.get("log_format", "%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(format=log_format, level=log_level)
+    return logging.getLogger(__name__)
 
 
 def load_global_config(path: str) -> Dict[str, Any]:
@@ -166,13 +187,10 @@ def get_audio_duration(audio_path: str) -> float:
 
     :param audio_path: Path to the audio file
     :return: Duration in seconds as a float
+    :raises RuntimeError: If file cannot be read
     """
-    try:
-        info = torchaudio.info(audio_path)
-        return info.num_frames / info.sample_rate
-    except RuntimeError as e:
-        print(f"⚠️ Failed to read audio info for '{audio_path}': {e}", file=sys.stderr)
-        return 0.0
+    info = torchaudio.info(audio_path)
+    return info.num_frames / info.sample_rate
 
 
 def discover_files(input_path: str, supported_exts) -> List[str]:
@@ -341,13 +359,22 @@ def main() -> int:
             global_cfg = load_global_config(args.config)
             entity_cfg = load_entity_config(global_cfg, args.entity)
         except Exception as e:
-            print(f"❌ Config load failed: {e}", file=sys.stderr)
+            logging.error("Config load failed: %s", e)
             return 1
     else:
         # Require both input/output if no entity is provided
         if not args.audio_input or not args.output_dir:
-            print("❌ Without --entity, both --audio-input and --output-dir must be defined", file=sys.stderr)
+            logging.error("Without --entity, both --audio-input and --output-dir must be defined")
             return 1
+
+    # Set up custom logger
+    logger = logger_setup(global_cfg.get("system", {}))
+
+    # Adjust logger level for quiet mode
+    if args.quiet:
+        logger.setLevel(logging.WARNING)
+    else:
+        logger.setLevel(logging.INFO)
 
     model = args.model or entity_cfg.get("transcription_model", "small")
 
@@ -355,13 +382,14 @@ def main() -> int:
     # Validate device for model inference
     # -----------------------------------------
     if torch.cuda.is_available() and args.device in ["auto", "cuda"]:
+        logger.debug("Cleared GPU cache")
         clear_gpu_cache()
         device = "cuda"
         use_fp16 = True  # Use fp16 for performance on GPU
     elif torch.backends.mps.is_available() and args.device in ["auto", "mps"]:
         if args.faster:
             # Handle the Faster-Whisper Edge Case
-            print("⚠️ Faster-Whisper does not support MPS (Metal) yet. Using CPU (optimized for ARM with faster-whisper).")
+            logger.warning("Faster-Whisper does not support MPS (Metal) yet. Using CPU (optimized for ARM with faster-whisper).")
             device = "cpu"
             use_fp16 = False
         else:
@@ -370,9 +398,9 @@ def main() -> int:
             use_fp16 = False
     else:
         if args.device == "cuda":
-            print("⚠️ CUDA requested but not available, falling back to CPU.", file=sys.stderr)
+            logger.warning("CUDA requested but not available, falling back to CPU.")
         if args.device == "mps":
-            print("⚠️ MPS requested but not available, falling back to CPU.", file=sys.stderr)
+            logger.warning("MPS requested but not available, falling back to CPU.")
         device = "cpu"
         use_fp16 = False
 
@@ -382,7 +410,7 @@ def main() -> int:
     if args.faster and HAS_FASTER_WHISPER:
         # Import faster-whisper
         from faster_whisper import WhisperModel
-        print(f"🚀 Using faster-whisper model '{model}' on device '{device}'...")
+        logger.info("Using faster-whisper model '%s' on device '%s'", model, device)
 
         compute_type = "float16" if use_fp16 else "int8"
         whisper_model = WhisperModel(model, device=device, compute_type=compute_type)
@@ -393,8 +421,8 @@ def main() -> int:
         from whisper.utils import get_writer
 
         if args.faster and not HAS_FASTER_WHISPER:
-            print("⚠️ faster-whisper requested but not installed, falling back to standard whisper.", file=sys.stderr)
-        print(f"🐢 Using standard whisper model '{model}' on device '{device}'...")
+            logger.warning("faster-whisper requested but not installed, falling back to standard whisper.")
+        logger.info("Using standard whisper model '%s' on device '%s'", model, device)
 
         whisper_model = whisper.load_model(model).to(device)
         use_faster_whisper = False
@@ -403,12 +431,12 @@ def main() -> int:
     audio_directory = args.audio_input or os.path.join(entity_cfg.get("data_path"), "audio")
     audio_file_list = discover_files(audio_directory, SUPPORTED_INPUT_EXTENSIONS)
     if not audio_file_list:
-        print("↪ No audio input files found", file=sys.stderr)
+        logger.info("No audio input files found at %s", audio_directory)
         return 0
 
     output_directory = args.output_dir or os.path.join(entity_cfg.get("data_path"), f"transcripts_{model}")
     if not os.path.isdir(output_directory):
-        print(f"✓ Output directory will be created: {output_directory}", file=sys.stderr)
+        logger.info("Output directory will be created: %s", output_directory)
         os.makedirs(output_directory, exist_ok=True)
 
     # Prepare hotwords
@@ -419,7 +447,7 @@ def main() -> int:
     hash_tracker = os.path.join(output_directory, ".vtt_hash")
     existing_hashes = load_tracked_hashes(hash_tracker)
 
-    print(f"🔍 Found {len(audio_file_list)} audio file(s) to transcribe.\n")
+    logger.info("Found %d audio file(s) to transcribe", len(audio_file_list))
 
     #-----------------------------------------
     # Start main transcription processing loop
@@ -438,13 +466,13 @@ def main() -> int:
         video_id = base_name.split(".", 1)[0]
         hash_key = f"{video_id}:{file_hash}"
         if hash_key in existing_hashes:
-            print(f"✅ Skipping already-transcribed file: {audio_path}")
+            logger.info("Skipping already-transcribed file: %s", audio_path)
             continue
 
         # Chunking support
         chunk_dir = os.path.join(audio_directory, "chunks", base_name)
         if args.get_chunks and os.path.isdir(chunk_dir):
-            print(f"Using chunk directory: {chunk_dir}")
+            logger.info("Using chunk directory: %s", chunk_dir)
             audio_chunks = sorted(
                 os.path.join(chunk_dir, f)
                 for f in os.listdir(chunk_dir)
@@ -454,9 +482,15 @@ def main() -> int:
             audio_chunks = [audio_path]
 
         # Total duration for progress bar (seconds)
-        total_duration = get_audio_duration(audio_path)
+        try:
+            total_duration = get_audio_duration(audio_path)
+        except RuntimeError as e:
+            logger.warning("Failed to read audio info for '%s': %s", audio_path, e)
+            total_duration = 0.0
+
+        # If verbose then faster whisper will output its own verbose steam
         progress_bar = None
-        if not verbose:
+        if sys.stdout.isatty() and not verbose:
             progress_bar = tqdm(
                 total=total_duration,
                 unit="sec",
@@ -481,8 +515,8 @@ def main() -> int:
             if use_faster_whisper:
                 try:
                     segments, _ = whisper_model.transcribe(audio_chunk, hotwords=hotwords, beam_size=5, language=lang, condition_on_previous_text=False)
-                except Exception as err:
-                    print(f"❌ Error transcribing '{audio_chunk}' with faster-whisper: {err}", file=sys.stderr)
+                except Exception:
+                    logger.error("Error transcribing '%s' with faster-whisper", audio_chunk, exc_info=True)
                     continue
             else:
                 # -----------------------------------------
@@ -492,8 +526,8 @@ def main() -> int:
                     result = whisper_model.transcribe(audio_chunk, initial_prompt=hotwords, verbose=verbose, language=lang, fp16=use_fp16, condition_on_previous_text=False)
                     # Extract segments safely
                     segments = result.get("segments", []) if isinstance(result, dict) else getattr(result, "segments", []) or []
-                except Exception as err:
-                    print(f"❌ Error transcribing '{audio_chunk}' with whisper: {err}", file=sys.stderr)
+                except Exception:
+                    logger.error("Error transcribing '%s'", audio_chunk, exc_info=True)
                     continue
 
             # normalize
@@ -530,7 +564,7 @@ def main() -> int:
                 text = seg.text.strip()
                 vtt_file.write(f"{start_ts} --> {end_ts}\n{text}\n\n")
                 if verbose:
-                    print(f"[{start_ts} --> {end_ts}] {text}", flush=True)
+                    logger.info("[%s --> %s] %s", start_ts, end_ts, text)
 
         if progress_bar:
             # We cheat a little to make the user feel warm and fuzzy
@@ -539,7 +573,7 @@ def main() -> int:
             progress_bar.close()
 
         duration = time.time() - start_time
-        print(f"✅ Transcript saved to: {vtt_filepath} in {duration:.1f}s")
+        logger.info("Transcript saved to: %s in %.1fs", vtt_filepath, duration)
 
         # Update hash tracker
         with open(hash_tracker, "a", encoding="utf-8") as hf:
