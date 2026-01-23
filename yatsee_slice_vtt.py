@@ -28,7 +28,7 @@ Dependencies:
   - Third-party: toml, webvtt-py
 
 Example Usage:
-  ./yatsee_slice_vtt.py -e city_council --vtt-input ./transcripts --create-txt
+  ./yatsee_slice_vtt.py -e city_council --vtt-input ./transcripts --gen-embed
   ./yatsee_slice_vtt.py --vtt-input ./audio/transcripts --max-window 30 --force
 """
 
@@ -424,7 +424,7 @@ def main() -> int:
               - hashlib, json, os, sys, argparse, logging (standard library)
 
             Usage Examples:
-              python yatsee_slice_vtt.py -e defined_entity --create-txt
+              python yatsee_slice_vtt.py -e defined_entity --gen-embed
               python yatsee_slice_vtt.py --vtt-input ./transcripts --window 30 --force
               python yatsee_slice_vtt.py -i ./entity/transcripts_small --output-dir ./segments
               python yatsee_slice_vtt.py -e defined_entity --quiet
