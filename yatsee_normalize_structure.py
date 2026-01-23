@@ -221,6 +221,42 @@ def limit_repetitions(text: str, inline_max: int = 2, line_max: int = 1) -> str:
     return '\n'.join(result_lines)
 
 
+def merge_incomplete_sentences(text: str) -> str:
+    """
+    Merge consecutive lines in a transcript that do not end with sentence-ending punctuation.
+
+    - Fixes over-splitting caused by spaCy or other sentence segmenters.
+    - Preserves paragraph breaks (double newlines) while merging incomplete lines.
+    - Trims extra whitespace and ignores empty lines.
+
+    :param text: Multi-line transcript string.
+    :return: Transcript with incomplete lines merged into full sentences.
+    """
+    import re
+
+    end_punct = re.compile(r"[.!?…]$")
+    paragraphs = re.split(r'\n\s*\n', text)  # preserve paragraph boundaries
+    merged_paragraphs = []
+
+    for para in paragraphs:
+        lines = [l.strip() for l in para.splitlines() if l.strip()]
+        buffer = []
+        merged_lines = []
+
+        for line in lines:
+            buffer.append(line)
+            if end_punct.search(line):
+                merged_lines.append(" ".join(buffer))
+                buffer = []
+
+        if buffer:
+            merged_lines.append(" ".join(buffer))
+
+        merged_paragraphs.append("\n".join(merged_lines))
+
+    return "\n\n".join(merged_paragraphs) + "\n"
+
+
 def capitalize_sentences(text: str, preserve_entities: Optional[List[str]] = None) -> str:
     """
     Capitalize the first alphabetical character of each sentence while
@@ -526,6 +562,7 @@ def main() -> int:
         normalized = normalize_text(raw_text, deep=args.deep_clean)
         normalized = capitalize_sentences(normalized)
         processed = process_text_to_sentences(normalized, spacy_model, not args.no_spacy, args.preserve_paragraphs)
+        processed = merge_incomplete_sentences(processed)
         processed = limit_repetitions(processed, inline_max=2, line_max=1)
         processed = apply_replacements(processed, replacements)
 
