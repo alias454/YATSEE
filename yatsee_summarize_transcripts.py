@@ -88,53 +88,42 @@ import toml
 import yaml
 
 
-def classify_meeting(session: requests.Session, llm_provider_url: str, model: str, prompt: str) -> str:
+def classify_meeting(session: requests.Session, llm_provider_url: str, model: str, prompt: str, allowed_labels: set[str]) -> str:
     """
     Classify the type of a meeting transcript using a local Ollama LLM.
 
-    The function sends a streaming request to the Ollama server with the provided
-    prompt and model, collects the streamed JSON responses, concatenates the text,
-    and validates the label against allowed meeting types.
+    The function sends a single request to the Ollama server with the provided
+    prompt and model, retrieves the JSON response, and validates the label
+    against allowed meeting types.
 
     :param session: A preconfigured requests.Session object for efficient HTTP reuse.
-    :param llm_provider_url: URL of the LLM provider server
+    :param llm_provider_url: URL of the LLM provider server.
     :param model: Name of the model to use (e.g., 'llama3').
     :param prompt: Prompt text containing context and transcript snippet.
-    :return: Lowercase meeting type label (e.g., 'city_council') or 'general' if unknown.
-    :raises RuntimeError: If HTTP request fails or JSON decoding fails.
+    :param allowed_labels: Set of accepted meeting types that can be returned.
+    :return: Lowercase meeting type label (e.g., 'city_council') or 'general' if no match.
+    :raises RuntimeError: If the HTTP request fails or JSON decoding fails.
     """
-    payload = {"model": model, "prompt": prompt, "stream": True}
+    # In case we don't identify a clear label type or have a prompt bail out
+    if not allowed_labels or not prompt:
+        return "general"
+
+    payload = {"model": model, "prompt": prompt, "stream": False}
     try:
-        response = session.post(f"{llm_provider_url}/api/generate", json=payload, stream=True)
+        response = session.post(f"{llm_provider_url}/api/generate", json=payload, timeout=30)
         response.raise_for_status()
 
-        raw_reply = ""
-        for line in response.iter_lines():
-            if not line:
-                continue
-            try:
-                data = json.loads(line.decode("utf-8"))
-                raw_reply += data.get("response", "")
-                if data.get("done", False):
-                    break
-            except json.JSONDecodeError as e:
-                raise RuntimeError(f"Failed to parse JSON from Ollama stream: {e}")
+        data = response.json()
+        raw = data.get("response", "").strip().lower()
 
-        label = raw_reply.strip().lower()
+        for label in allowed_labels:
+            if label in raw:
+                return label
 
-        # Accepted meeting types The model returns on of these based on the classifier prompt
-        allowed_labels = {
-            "city_council",
-            "finance_committee",
-            "committee_of_the_whole",
-            "zoning_committee",
-            "general"
-        }
+        # Always return something if classifications fails
+        return "general"
 
-        label = label if label in allowed_labels else "general"
-        return label
-
-    except requests.RequestException as e:
+    except (requests.RequestException, ValueError) as e:
         raise RuntimeError(f"Error during meeting classification request: {e}")
 
 
@@ -478,7 +467,7 @@ def write_summary_file(summary: str, basename: str, output_dir: str, fmt: str = 
     :return: Full path of the written file
     :raises OSError, IOError: If the file cannot be written
     """
-    filename = f"{basename}.{'md' if fmt == 'markdown' else 'yaml'}"
+    filename = f"{basename}.summary.{'md' if fmt == 'markdown' else 'yaml'}"
     out_path = os.path.join(output_dir, filename)
 
     os.makedirs(output_dir, exist_ok=True)
@@ -761,17 +750,29 @@ def main():
         PROMPTS = {k: v["text"] for k, v in _prompts.get("prompts", {}).items()}
         PROMPT_LOOKUP = _prompts.get("prompt_router", {})
         CLASSIFIER_PROMPT = _prompts.get("classifier_prompt", {}).get("text", "")
+        classifier_types = _prompts.get("classifier_types", {})
     else:
         # fallback: inline general defaults
         logger.warning("No prompts found for job type '%s', using inline general defaults", args.job_type)
         PROMPTS = {
-            "overview": "Default overview prompt text...",
-            "action_items": "Default action items prompt text..."
+            "overview": (
+                "You are an assistant that produces a high-level summary of a meeting transcript.\n\n"
+                "Context: {context}\n\n"
+                "Transcript:\n{text}\n\n"
+                "Summarize the key points, main discussions, and outcomes in clear, concise language."
+            ),
+            "action_items": (
+                "You are an assistant that extracts actionable items, motions, and decisions from a meeting transcript.\n\n"
+                "Context: {context}\n\n"
+                "Transcript:\n{text}\n\n"
+                "List only the actionable items or decisions in plain language. Skip commentary or filler text."
+            )
         }
         PROMPT_LOOKUP = {
             "general": {"first": "overview", "multi": "overview", "final": "action_items"}
         }
         CLASSIFIER_PROMPT = ""
+        classifier_types = {}
 
     if args.disable_auto_classification:
         validate_prompt(args.first_prompt, "first-prompt", PROMPTS)
@@ -862,7 +863,13 @@ def main():
             if not args.disable_auto_classification:
                 # Try to auto classify the meeting type based off a small snippet of text
                 classifier_prompt = CLASSIFIER_PROMPT.format(context=context, text=transcript[:2000])
-                meeting_type = classify_meeting(session=llm_session, llm_provider_url=llm_provider_url, model=model, prompt=classifier_prompt)
+                meeting_type = classify_meeting(
+                    session=llm_session,
+                    llm_provider_url=llm_provider_url,
+                    model=model,
+                    prompt=classifier_prompt,
+                    allowed_labels=set(classifier_types.get("allowed", []))
+                )
 
                 # track token usage
                 token_usage += estimate_token_count(classifier_prompt)
@@ -875,9 +882,12 @@ def main():
 
             logger.info("Processing transcript: %s", base_name)
 
+            # Set pass count values
+            max_pass = args.max_pass
+
             # Loop to dynamically summarize text, possibly recursively summarizing summaries
             pass_num = 1  # Current pass counter
-            while pass_num <= args.max_pass:
+            while pass_num <= max_pass:
                 # Select prompt type: first pass uses 'prompt_type_first', subsequent use 'prompt_type_second'
                 prompt_type = first_pass_id if pass_num == 1 else multi_pass_id
 
@@ -936,7 +946,7 @@ def main():
 
                 # If summary is small enough or this is the last pass, finalize and exit loop
                 if pass_num >= 2:
-                    if estimate_token_count(summary) <= max_tokens or len(chunk_summaries) == 1 or pass_num == args.max_pass:
+                    if estimate_token_count(summary) <= max_tokens or len(chunk_summaries) == 1 or pass_num == max_pass:
                         logger.info("Processing final summary with prompt [%s]", final_pass_id)
                         prompt_template = PROMPTS.get(final_pass_id, PROMPTS["detailed"])
                         final_prompt = prompt_template.format(context=context or "No context provided.", text=summary)
@@ -957,9 +967,6 @@ def main():
             if chunks_only:
                 continue # continue to next file
 
-            # After all passes or break condition, final_summary is stored in transcript variable
-            final_summary = transcript
-
             # Calculate total tokens used and estimate API cost
             total_tokens = token_usage + output_token_usage
             estimated_cost = calculate_cost_openai_gpt4o(token_usage, output_token_usage)
@@ -972,24 +979,29 @@ def main():
             # Write output files per job type
             # ----------------------------
             if args.job_type == "summary":
-                final_basename = f"{base_name}.summary"
                 try:
-                    summary_file = write_summary_file(final_summary, final_basename, output_dir, args.output_format)
+                    # After all passes or break condition, final_summary is stored in transcript variable
+                    final_summary = transcript
+
+                    summary_file = write_summary_file(final_summary, base_name, output_dir, args.output_format)
                     logger.debug("\nFinal Summary:\n")
                     logger.debug(final_summary)
                     logger.info("Final summary written to: %s\n", summary_file)
                 except Exception as e:
                     logger.error("Failed to write summary file: %s", e)
-            # elif args.job_type == "research":
-            #     # Write the final facts gathered to json
-            #     final_basename = f"{base_name}.research"
-            #     # Instead of prose, we aggregate fact objects (JSONL)
-            #     final_facts = aggregate_facts_from_chunks(chunk_summaries)
-            #     success = write_facts_file(final_facts, final_basename, output_dir)  # writes JSONL or YAML
-            #     if success:
-            #         logger.info("Research facts written to: %s", os.path.join(output_dir, final_basename) + ".jsonl")
-            #     else:
-            #         logger.error("Failed to write research facts file: %s", final_basename)
+            elif args.job_type == "research":
+                try:
+                    pass
+                    # print(summary)
+                    # After all passes or break condition, final_facts stored as json
+                    # final_facts = aggregate_facts_from_chunks(chunk_summaries)
+                    #
+                    # fact_file = write_facts_file(final_facts, base_name, output_dir)
+                    # logger.debug("\nFinal Summary:\n")
+                    # logger.debug(final_facts)
+                    # logger.info("Research facts written to: %s\n", fact_file)
+                except Exception as e:
+                    logger.error("Failed to write research facts file: %s", e)
 
         except Exception as e:
             # Catch and report any errors reading file or processing

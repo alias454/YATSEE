@@ -11,6 +11,17 @@ committee_of_the_whole = { first = "committee_meeting_detailed", multi = "struct
 zoning_committee = { first = "more_detailed", multi = "structure_preserving", final = "committee_meeting_final" }
 general = { first = "more_detailed", multi = "structure_preserving", final = "final_pass_detailed" }
 
+# =========================
+# YATSEE Classifier Allowed Types
+# =========================
+[classifier_types]
+allowed = [
+    "city_council",
+    "finance_committee",
+    "committee_of_the_whole",
+    "zoning_committee",
+    "general"
+]
 
 # =========================
 # YATSEE Classifiy meeting types
