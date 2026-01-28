@@ -193,16 +193,19 @@ def limit_repetitions(text: str, inline_max: int = 2, line_max: int = 1) -> str:
     :param line_max: Max consecutive identical lines.
     :return: Cleaned text.
     """
+    pattern = re.compile(r'\b((?:\w+\s+){0,4}\w+)(?:\s+\1){' + str(inline_max) + r',}', flags=re.IGNORECASE)
+
     result_lines = []
     prev_line_key = None
     consecutive_count = 0
 
     for line in text.splitlines():
-        processed = collapse_inline(line.strip(), inline_max)
+        # Use the pre-compiled pattern
+        processed = pattern.sub(lambda m: (' ' + m.group(1)) * inline_max, line.strip())
+
         current_key = re.sub(r'[^a-z0-9]', '', processed.lower())
 
         if not current_key:
-            # Preserve paragraph breaks as empty lines
             result_lines.append('')
             prev_line_key = None
             consecutive_count = 0
@@ -292,18 +295,20 @@ def capitalize_sentences(text: str, preserve_entities: Optional[List[str]] = Non
     return ' '.join(capitalized)
 
 
+
 def normalize_text(text: str, deep: bool = False, preserve_entities: Optional[List[str]] = None) -> str:
     """
     Robust transcript normalization.
 
     Features:
+    - Standardizes time formats (e.g., '4: 16 p.m.' -> '4:16 PM')
+    - Fixes split numerics and large numbers (e.g., '3 . 5' -> '3.5', '1, 000' -> '1,000')
     - Collapses character stutters (sooooo -> soo)
     - Collapses short word/phrase repetitions
-    - Removes filler words (optional)
+    - Normalizes punctuation and removes "dragging" whitespace before commas/dots
     - Preserves numbers, acronyms, and entity names
-    - Removes bracketed content (optional deep clean)
-    - Fixes spacing, punctuation, and capitalization for 'I'
-    - Preserves paragraph breaks
+    - Fixes spacing, punctuation, and capitalization for 'I' and 'U.S.'
+    - Removes filler words and bracketed content (optional deep clean)
 
     :param text: Raw transcript text
     :param deep: Enable deep cleaning (filler words, brackets)
@@ -311,39 +316,71 @@ def normalize_text(text: str, deep: bool = False, preserve_entities: Optional[Li
     :return: Normalized text
     """
     preserve_entities = preserve_entities or []
-    placeholders = {f"__ENTITY{i}__": re.escape(name) for i, name in enumerate(preserve_entities)}
+    placeholders = {f"__ENTITY{i}__": name for i, name in enumerate(preserve_entities)}
 
     # --- Protect entity names temporarily ---
     for ph, name in placeholders.items():
-        text = re.sub(r'\b' + name + r'\b', ph, text, flags=re.IGNORECASE)
+        text = re.sub(r'\b' + re.escape(name) + r'\b', ph, text, flags=re.IGNORECASE)
 
-    # --- Normalize whitespace ---
+    # --- Structural & Whitespace Cleanup ---
     text = re.sub(r'[\s\r\n\u00A0]+', ' ', text)
-
-    # --- Collapse character stutters (sooooo -> soo) ---
-    text = re.sub(r'(.)\1{3,}', r'\1\1', text)
-
-    # --- Collapse short word-level stutters (F F F -> F) ---
-    text = re.sub(r'\b([A-Za-z])(?:[\s,]+\1){2,}\b', r'\1', text)
-
-    # --- Collapse repeated short phrases (thank you thank you thank you -> thank you) ---
+    text = re.sub(r'(.)\1{3,}', r'\1\1', text)  # Collapse char stutters
+    text = re.sub(r'\b([A-Za-z])(?:[\s,]+\1){2,}\b', r'\1', text)  # Collapse word stutters
     text = re.sub(r'\b((?:\w+\s+){0,3}\w+)(?:\s+\1){2,}', r'\1', text, flags=re.IGNORECASE)
 
-    # --- Punctuation normalization ---
+    # --- Punctuation Standardization ---
+    # Enforce "Space After Punctuation" globally.
+    # Fixes "March 21,2025" -> "March 21, 2025".
+    # However, it temporarily breaks times ("4:16" -> "4: 16") and numbers ("1,000" -> "1, 000").
     text = re.sub(r',{2,}', ',', text)
     text = re.sub(r'([?!])\1+', r'\1', text)
     text = re.sub(r'\s*\.\s*\.\s*\.', ' ... ', text)
     text = re.sub(r'\.{2,}', '.', text)
+    text = re.sub(r'\s+([.,!?;:])', r'\1', text)  # Remove space before
+    text = re.sub(r'([.,!?;:])(?=\S)', r'\1 ', text)  # Add space after
+
+    # --- Time Normalization ---
+    # Unified Regex to handle:
+    # 1. Separated: "4: 16 p. M.", "4.30 a. m."
+    # 2. Mashed:    "416 p. m."
+    # 3. Hour Only: "10 a. M."
+
+    # Regex Logic:
+    # \b(\d{1,2})           -> Group 1: Hour
+    # (?:                   -> Start Non-capturing group for Minutes
+    #   (?:\s*[:.]\s*|\s+)? ->   Inner Non-capturing: Separator (Colon/Dot/Space) is OPTIONAL
+    #   (\d{2})             ->   Group 2: Minutes (Must be 2 digits if they exist)
+    # )?                    -> End Minutes group (Whole group is OPTIONAL)
+    # \s*([AaPp])           -> Group 3: A/P
+    # \.?\s*[Mm]...         -> M with trailing dot checks
+    text = re.sub(
+        r'\b(\d{1,2})(?:(?:\s*[:.]\s*|\s+)?(\d{2}))?\s*([AaPp])\.?\s*[Mm](?:\.(?!\w)|\b)',
+        lambda m: f"{m.group(1)}:{m.group(2)} {m.group(3).upper()}M" if m.group(2) else f"{m.group(1)} {m.group(3).upper()}M",
+        text
+    )
+
+    # --- Post-Time Cleanup ---
+    # The Time logic eats trailing dots (from "p.m."), but Step 3 might have left a space
+    # before the next comma. E.g., "4:16 PM ,". This snaps it back to "4:16 PM,".
     text = re.sub(r'\s+([.,!?;:])', r'\1', text)
-    text = re.sub(r'([.,!?;:])(?=\S)', r'\1 ', text)
+
+    # --- Numeric Re-assembly (The "Gluer") ---
+    # Re-glue Decimals/Ratios: "3 . 5" -> "3.5"
+    text = re.sub(r'(\d+)\s*([.:])\s*(\d+)', r'\1\2\3', text)
+
+    # Re-glue Large Numbers: "2, 525, 000" -> "2,525,000"
+    # CRITICAL: We use (?!\d) to ensure the second group is EXACTLY 3 digits.
+    # This prevents merging dates like "March 21, 2025" because 2025 is 4 digits.
+    # We run this twice to handle chained numbers (Millions/Billions).
+    large_num_regex = r'(\d{1,3})(?:\s*,\s*|\s+)(\d{3})(?!\d)'
+    text = re.sub(large_num_regex, r'\1,\2', text)
+    text = re.sub(large_num_regex, r'\1,\2', text)
 
     # --- Content-specific fixes ---
     text = re.sub(r'\bi\b', 'I', text)
-    text = re.sub(r'\$\s+(\d)', r'$\1', text)
-    text = re.sub(r'(\d)\s+%', r'\1%', text)
+    text = re.sub(r'\$\s+(\d)', r'$\1', text)  # "$ 50" -> "$50"
+    text = re.sub(r'(\d)\s+%', r'\1%', text)  # "50 %" -> "50%"
     text = re.sub(r'\b(u)\.\s*(s)\.\b', 'U.S.', text, flags=re.IGNORECASE)
-    text = re.sub(r'(\d{1,3})(?:\s*,\s*|\s+)(\d{3})', r'\1,\2', text)
-    text = re.sub(r'(\d+)\s*\.\s*(\d+)', r'\1.\2', text)
 
     # --- Deep cleaning ---
     if deep:
@@ -355,35 +392,6 @@ def normalize_text(text: str, deep: bool = False, preserve_entities: Optional[Li
     # --- Restore entity placeholders ---
     for ph, name in placeholders.items():
         text = text.replace(ph, name)
-
-    return text.strip()
-
-
-def normalize_text_minimal(text: str) -> str:
-    """
-    Perform minimal transcript normalization.
-
-    Notes:
-    - Cleans whitespace and repeated characters.
-    - Fixes numbers and currency formatting.
-    - Capitalizes first letters of sentences.
-
-    :param text: Raw transcript text.
-    :return: Partially normalized text.
-    """
-    # Normalize whitespace
-    text = re.sub(r'[\s\r\n\u00A0]+', ' ', text)
-
-    # Collapse repeated characters
-    text = re.sub(r'(.)\1{3,}', r'\1\1', text)
-
-    # Fix numbers and currency
-    text = re.sub(r'\$\s+(\d)', r'$\1', text)
-    text = re.sub(r'(\d{1,3})(?:\s*,\s*|\s+)(\d{3})', r'\1,\2', text)
-    text = re.sub(r'(\d+)\s*\.\s*(\d+)', r'\1.\2', text)
-
-    # Capitalize first letters
-    text = capitalize_sentences(text)
 
     return text.strip()
 
