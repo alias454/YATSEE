@@ -481,7 +481,7 @@ def main() -> int:
         return 0
 
     # By default, output directory is the same as the input directory
-    output_directory = args.vtt_input or os.path.join(entity_cfg["data_path"], f"transcripts_{entity_cfg.get('transcription_model', 'small')}")
+    output_directory = args.output_dir or os.path.join(entity_cfg["data_path"], f"transcripts_{entity_cfg.get('transcription_model', 'small')}")
     if not os.path.isdir(output_directory):
         logger.info("Output directory will be created: %s", output_directory)
         os.makedirs(output_directory, exist_ok=True)

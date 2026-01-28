@@ -341,7 +341,7 @@ def main() -> int:
     parser.add_argument("-i", "--audio-input", help="Audio file or directory (Defaults to ./audio)")
     parser.add_argument("-o", "--output-dir", help="Directory to save transcripts")
     parser.add_argument("-g", "--get-chunks", action="store_true", help="Transcribe using audio chunk files")
-    parser.add_argument("-m", "--model", help="Whisper model size (overrides entity/system defaults)")
+    parser.add_argument("-m", "--model", help="Whisper model size (overrides entity/system defaults: small, medium, turbo etc.c)")
     parser.add_argument("--faster", action="store_true", help="Use faster-whisper if installed")
     parser.add_argument("-l", "--lang", default="en", help="Language code or 'auto'")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
@@ -373,8 +373,13 @@ def main() -> int:
     # Adjust logger level for quiet mode
     if args.quiet:
         logger.setLevel(logging.WARNING)
+        logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+    elif verbose:
+        logger.setLevel(logging.DEBUG)
+        logging.getLogger("faster_whisper").setLevel(logging.DEBUG)
     else:
         logger.setLevel(logging.INFO)
+        logging.getLogger("faster_whisper").setLevel(logging.WARNING)
 
     model = args.model or entity_cfg.get("transcription_model", "small")
 
@@ -428,10 +433,10 @@ def main() -> int:
         use_faster_whisper = False
 
     # Use audio_input if specified; else fall back to entity data_path
-    audio_directory = args.audio_input or os.path.join(entity_cfg.get("data_path"), "audio")
-    audio_file_list = discover_files(audio_directory, SUPPORTED_INPUT_EXTENSIONS)
+    audio_input = args.audio_input or os.path.join(entity_cfg.get("data_path"), "audio")
+    audio_file_list = discover_files(audio_input, SUPPORTED_INPUT_EXTENSIONS)
     if not audio_file_list:
-        logger.info("No audio input files found at %s", audio_directory)
+        logger.info("No audio input files found at %s", audio_input)
         return 0
 
     output_directory = args.output_dir or os.path.join(entity_cfg.get("data_path"), f"transcripts_{model}")
@@ -470,6 +475,10 @@ def main() -> int:
             continue
 
         # Chunking support
+        audio_directory = audio_input
+        if os.path.isfile(audio_input):
+            audio_directory = os.path.dirname(audio_input)
+
         chunk_dir = os.path.join(audio_directory, "chunks", base_name)
         if args.get_chunks and os.path.isdir(chunk_dir):
             logger.info("Using chunk directory: %s", chunk_dir)
@@ -514,7 +523,8 @@ def main() -> int:
             # -----------------------------------------
             if use_faster_whisper:
                 try:
-                    segments, _ = whisper_model.transcribe(audio_chunk, hotwords=hotwords, beam_size=5, language=lang, condition_on_previous_text=False)
+                    segments, _info = whisper_model.transcribe(audio_chunk, hotwords=hotwords, log_progress=verbose, beam_size=5, language=lang, condition_on_previous_text=False)
+                    # print("Detected language '%s' with probability %f" % (_info.language, _info.language_probability))
                 except Exception:
                     logger.error("Error transcribing '%s' with faster-whisper", audio_chunk, exc_info=True)
                     continue
@@ -573,7 +583,9 @@ def main() -> int:
             progress_bar.close()
 
         duration = time.time() - start_time
-        logger.info("Transcript saved to: %s in %.1fs", vtt_filepath, duration)
+        hours, remainder = divmod(int(duration), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        logger.info("Transcript saved to: %s in %s", vtt_filepath, f"{f'{hours}h ' if hours else ''}{minutes}m {seconds}s")
 
         # Update hash tracker
         with open(hash_tracker, "a", encoding="utf-8") as hf:
