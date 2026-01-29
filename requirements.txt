@@ -12,3 +12,4 @@ sentence-transformers~=4.1.0
 deepmultilingualpunctuation~=1.0.1
 chromadb>=1.4.0
 streamlit>=1.52.2
+mdformat~=1.0.0
