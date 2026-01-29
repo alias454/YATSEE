@@ -5,7 +5,7 @@
 # =========================
 # Map the prompt name to the summariy pass
 [prompt_router]
-city_council = {first = "most_detailed", multi = "structure_preserving", final = "civic_scan"}
+city_council = {first = "structured_yaml", multi = "structure_preserving", final = "civic_scan"}
 finance_committee = { first = "finance_committee_detailed", multi = "structure_preserving", final = "finance_committee_final" }
 committee_of_the_whole = { first = "committee_meeting_detailed", multi = "structure_preserving", final = "committee_meeting_final" }
 zoning_committee = { first = "more_detailed", multi = "structure_preserving", final = "committee_meeting_final" }
@@ -70,64 +70,6 @@ Instructions:
 - Avoid repeating headers.
 - Use **plain Arabic numerals** for any numbered items or lists.
 - Use they/them pronouns unless gender is explicit.
-"""
-
-[prompts.action_items]
-text = """
-You are an assistant producing structured meeting minutes from transcripts.
-
-Context: {context}
-
-Transcript:
-{text}
-
-Instructions:
-- Extract actionable content: motions, decisions, follow-ups, assigned tasks.
-- Exclude commentary or informal remarks.
-- Omit empty sections.
-- Avoid repeating headers.
-- Use **bold headers** for major topics.
-- Use **plain Arabic numerals** for numbered items.
-- Use they/them pronouns unless gender is explicit.
-"""
-
-[prompts.roll_call_only]
-text = """
-You are an assistant producing structured meeting minutes from transcripts.
-
-Context: {context}
-
-Transcript:
-{text}
-
-Instructions:
-- Extract attendance information only.
-- List Present and Absent names.
-- Infer attendance if roll call not read.
-- Exclude titles unless clarity is required.
-- Skip irrelevant commentary.
-- Use **bold headers** for attendance sections.
-- Use **plain Arabic numerals** for any numbered items.
-"""
-
-[prompts.vote_log_only]
-text = """
-You are an assistant producing structured meeting minutes from transcripts.
-
-Context: {context}
-
-Transcript:
-{text}
-
-Instructions:
-- List all motions and votes.
-- Format: 'Motion to [action], made by [name], seconded by [name] – Passed [X–Y]'.
-- Include individual votes if roll call taken.
-- Skip unrelated procedural commentary.
-- Omit empty sections.
-- Avoid repeating headers.
-- Use **bold headers** for motion/vote sections.
-- Use **plain Arabic numerals** for numbered lists.
 """
 
 [prompts.finance_meeting_summary]
@@ -215,43 +157,55 @@ Instructions:
 
 [prompts.committee_meeting_detailed]
 text = """
-You produce detailed committee meeting minutes.
+You are a High-Fidelity Data Miner specializing in legislative committees. Your task is to extract every recommendation, financial detail, and citizen concern from this committee transcript.
 
-Context: {context}
+**Context:** {context}
 
-Transcript:
+**Transcript:**
 {text}
 
-Instructions:
-- Include committee name, attendees, location, date under **bold header**.
-- Capture key discussion points, motions, seconders, outcomes.
-- Include vote counts or roll call if available.
-- Preserve procedural and chronological flow.
-- Include notable quotes only if they influence decisions.
-- Record recommendations and follow-ups.
-- Exclude empty or irrelevant sections.
-- Use **bold headers** for each major section.
-- Use **plain Arabic numerals** for lists and items.
-- Use they/them pronouns unless gender is explicit.
+**Extraction Requirements:**
+1. **The Lead:** Identify the Committee name, date, and a specific list of attendees.
+2. **Business & Recommendations:** For every topic discussed, extract:
+   - **Topic:** Clear legislative or project name (e.g., Wastewater Plant Upgrade).
+   - **Financials:** Precise dollar amounts, funding sources (e.g., State Revolving Fund), and estimated design fees.
+   - **Intent:** What is the committee recommending to the full Council? (e.g., 'Move forward with Phase 2').
+3. **The Debate:** Capture specific questions or concerns raised by members (e.g., Alderman Shadle's footprint concerns).
+4. **Public Testimony:** Capture the name of every citizen speaker and a high-fidelity summary of their specific grievances or requests.
+5. **Procedural Action:** Note all motions, seconders, and the resulting recommendation vote.
+
+**Strict Rules:**
+- **No Roman Numerals:** Use plain Arabic numerals (1, 2, 3) for all lists.
+- **Data over Narrative:** Do not summarize into vague paragraphs; use structured bullet points.
+- **Zero Omissions:** Do not ignore small items (like Sister City proposals).
+- **No Meta-Talk:** Output the data only.
 """
 
 [prompts.committee_meeting_final]
 text = """
-You synthesize committee meeting summaries into a unified markdown report.
+You are the Lead Committee Auditor. Your task is to synthesize committee summaries into a definitive report that identifies upcoming Council business and financial commitments.
 
-Context: {context}
+**Context:** {context}
 
-Summaries:
+**Summaries:**
 {text}
 
-Instructions:
-- Organize by agenda item or major topic under **bold headers**.
-- Include motions and votes only when clearly stated.
-- Reflect disagreements or unresolved issues neutrally.
-- Group unresolved items under Discussion Points or Open Questions.
-- Remove redundancy across summaries.
-- Preserve comments only if they clarify positions.
-- Use **plain Arabic numerals** for numbered items.
+**Final Output Requirements:**
+- **Strict Header Usage:** You MUST organize the output into these sections ONLY:
+    1. Committee Overview (Name, Date, Attendees)
+    2. Recommendations to Council (Focus on items moving to a full vote)
+    3. Project Updates & Financial Commitments (Focus on $45M+ projects, PFAS costs, etc.)
+    4. Member Discussion & Debate (Highlight specific points of contention)
+    5. Public Comment (Name speakers and summarize concerns with high specificity)
+    6. Follow-ups & Assigned Tasks (Assign actions to specific staff/members)
+
+**Audit Constraints:**
+1. **Headers:** Use plain Arabic numerals (1, 2, 3) for section headers. DO NOT USE ROMAN NUMERALS.
+2. **Follow the Money:** Explicitly state costs and funding mechanisms (Loans vs. Rates).
+3. **Recency Bias:** Ensure the items from the beginning of the meeting (Agenda/Sister City) are not crowded out by the end of the meeting.
+4. **No Conversational Filler:** Do not say 'Here is the report'. Start immediately with the headers.
+
+**Tone:** Objective, exhaustive, and structured for legislative tracking.
 """
 
 [prompts.detailed]
@@ -321,9 +275,9 @@ Instructions:
 - Use **plain Arabic numerals** for lists and items.
 """
 
-[prompts.max_detailed]
+[prompts.max_detailed_md]
 text = """
-You produce comprehensive civic meeting summaries.
+You are a civic meeting summarizer producing a comprehensive, structured markdown summary from transcripts.
 
 Context: {context}
 
@@ -331,32 +285,200 @@ Transcript:
 {text}
 
 Instructions:
-- Preserve procedural history in chronological and topical order.
-- Include all motions, amendments, deferrals, withdrawals, votes.
-- List individual roll call votes.
-- Capture public comments with specificity.
-- Include timestamps or segment references when available.
-- Preserve procedural nuance even if unanimous.
-- Surface financial details precisely.
-- Flag controversial or high-sentiment items without editorializing.
-- Document follow-ups and action items.
-- Allowed **bold headers**:
-  1. Ordinances and Resolutions
-  2. Contracts and Spending
-  3. Property and Development
-  4. Appointments
-  5. Public Comment
-  6. Budget and Finance
-  7. Other Discussion
-- Avoid repeating metadata.
-- Use quotes only when clarifying or expressing sentiment.
-- Never fabricate attribution or data.
-- Use **plain Arabic numerals** consistently.
+- Summarize all agenda items, discussions, and decisions in **chronological and topical order**.
+- Include **motions, who made and seconded them, amendments, deferrals, and vote outcomes**. If roll call votes are taken, list each individual vote.
+- Preserve **speaker attribution** whenever clearly stated. If unnamed, refer generically (e.g., 'a council member said…').
+- For **public comments**, capture each speaker’s point, concern, or praise with as much context and specificity as possible.
+- Include **timestamps or segment references** for agenda items or comments if available.
+- Capture **procedural details**: first/second readings, motions withdrawn, deferred items, amendments, objections, or debates even if final vote passes unanimously.
+- Surface **financial or quantitative details** precisely: original amounts, proposed changes, total amounts, budget line items, TIF allocations, grant details, or other fiscal data.
+- Identify and flag **controversial, contentious, or public-sentiment-heavy items**, but avoid editorializing.
+- Document **follow-ups or action items**, whether formal motions or requests for further review.
+- Group content under clear, topical section headers:
+    1. Ordinances and Resolutions
+    2. Contracts and Spending
+    3. Property and Development
+    4. Appointments
+    5. Public Comment
+    6. Budget & Finance
+    7. Other Discussion
+- Maintain a **neutral, civic tone**.
+- Use **plain numbers (1, 2, 3…)** instead of Roman numerals.
+- Avoid repeating metadata (date, location) more than once.
+- Include **quotes only when they clarify a point, emphasize a concern, or reflect public sentiment**; otherwise paraphrase naturally.
+- Never fabricate data or assume speakers’ identity beyond what is explicit in the transcript.
+- Keep markdown clean, with bullet points, subheaders, and readable formatting.
+"""
+
+[prompts.structured_yaml]
+text = """
+You are a civic meeting summarizer producing a structured YAML summary from multiple transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Extract all agenda items, discussions, and decisions in chronological and topical order.
+- Include motions, who made and seconded them, amendments, deferrals, and vote outcomes.
+- If roll call votes are taken, list each individual vote when the participants are known.
+- Vote counts, tally counts, financial numbers, and speaker names must only be used if found in the current transcript.
+- Only list a vote if it explicitly appears in the transcript. If unsure, leave the tally entry blank or 'unknown'.
+- Record abstentions only if explicitly stated. Do not infer abstentions from vote totals or attendance.
+- For public comments, capture each speaker’s point, concern, or praise with as much context as possible.
+- Preserve speaker attribution whenever explicitly stated; if unnamed, refer generically (e.g., 'a council member said…' or 'unknown speaker').
+- Capture procedural details: first/second readings, motions withdrawn, deferred items, amendments, objections, or debates, even if final vote passes unanimously.
+- Surface financial or quantitative details accurately: original amounts, proposed changes, total amounts, budget line items, grants, or other fiscal data. If not stated, mark as 'unknown'.
+- Flag sections that contain heavy public sentiment at the section level.
+- Only set heavy_public_sentiment to `true` if explicit disagreement, objection, or public comment is stated in the transcript. Otherwise default to `false`.
+- Flag discourse_intensity in each section using one of: [None, Light, High].
+- Use High only if there is significant public outcry or intense council debate.
+- Document follow-ups or action items under the relevant agenda item.
+- Maintain a neutral civic tone.
+- Use plain numbers (1, 2, 3…) instead of Roman numerals.
+- Avoid repeating metadata (date, location) more than once.
+- Include quotes only when they clarify a point, emphasize a concern, or reflect public sentiment.
+- Return only structured YAML. Do not include explanations or additional commentary in the output.
+
+Section Categories (section_kind) Do not invent any other (section_kind) categories:
+- ordinance
+- contract
+- property
+- appointment
+- comments
+- budget
+- public_safety
+- transportation
+- other (Use for items that do not fit any other category)
+
+For each section:
+- Identify a clear subject (e.g., ordinance number, agenda item name, or topic).
+- Nest procedural events under the same agenda item when possible (presentation, discussion, motion, vote, follow-up).
+- Use typed fields for each event_type: [presentation, discussion, motion, vote, clarification, comments, follow_up]
+
+Expected YAML structure:
+
+meeting:
+  title: <string>
+  date: <YYYY-MM-DD>
+  attendees:
+    - name: <string>
+
+sections:
+  - section_kind: <ordinance|contract|property|appointment|comments|budget|transportation|public_safety|other>
+    identifier: <agenda item or topic name>
+    stage: <optional procedural stage>
+    discourse_intensity: [None, Light, High]
+    heavy_public_sentiment: <true/false>
+    entries:
+      - event_type: <type>
+        speaker: <string>
+        summary: <string>
+        motion: <optional, include made_by, seconded_by, text>
+        vote: <optional, include outcome, method, tally, roll_call>
+        financials: <optional>
+"""
+
+[prompts.max_structured_yaml]
+text = """
+You are a civic meeting summarizer producing a lossless, structured YAML record from multiple transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Primary goal:
+Extract and normalize factual meeting data into structured YAML blocks. Do NOT optimize for readability. Do NOT summarize for presentation. Preserve detail and attribution so downstream processes can regroup, consolidate, and render later.
+
+Instructions:
+- Extract all agenda items, discussions, procedural actions, and decisions in chronological order.
+- Preserve speaker attribution whenever explicitly stated. If unclear, use a generic role (e.g., "council member", "staff").
+- Represent information as typed events, not narrative paragraphs.
+- Do not duplicate the same information in multiple sections.
+
+Model the meeting as a sequence of sections, each containing structured entries.
+
+Section categories (use only these values for section_kind):
+- ordinance
+- contract
+- property
+- appointment
+- public_comment
+- budget
+- other
+
+For each section:
+- Identify a clear subject (e.g., ordinance number, agenda item name, topic).
+- Capture procedural stage when applicable (first_reading, second_reading, discussion, vote, deferral).
+
+For each entry, use typed fields when applicable:
+- event_type: one of [presentation, motion, discussion, vote, clarification, public_comment]
+- speaker
+- summary: concise factual description of what occurred
+- motion:
+    text
+    made_by
+    seconded_by
+- vote:
+    method: voice | roll_call | unanimous
+    outcome: passed | failed | deferred
+    tally: optional
+    roll_call: optional list of individual votes
+- financials:
+    amounts
+    rates
+    terms
+    funding_source
+- flags:
+    controversial: true|false
+    public_sentiment_heavy: true|false
+- timestamp or segment reference if available
+
+Public comments:
+- Create one entry per speaker.
+- Capture the substance of the comment, not verbatim speech.
+- Preserve concerns, requests, praise, or objections distinctly.
+
+Constraints:
+- Never invent speakers, votes, or financial data.
+- Do not collapse or editorialize disagreements.
+- Avoid quotes unless necessary to preserve meaning.
+- Do not generate derived summaries or cross-section aggregations.
+
+Output requirements:
+- Emit valid YAML only.
+- Use consistent indentation.
+- Do not include markdown or explanatory text.
+
+Expected structure:
+
+meeting:
+  title: <string>
+  date: <YYYY-MM-DD>
+  attendees:
+    - name: <string>
+      role: <optional>
+
+sections:
+  - section_kind: <ordinance|contract|property|appointment|public_comment|budget|other>
+    identifier: <e.g., Ordinance 2024-51 or topic name>
+    stage: <optional procedural stage>
+    entries:
+      - event_type: <type>
+        speaker: <string>
+        summary: <string>
+        motion: <optional>
+        vote: <optional>
+        financials: <optional>
+        flags: <optional>
+        timestamp: <optional>
 """
 
 [prompts.structure_preserving]
 text = """
-You produce intermediate, structure-preserving summaries.
+You are a meeting summarizer producing a single, detailed Markdown record from multiple transcript sections.
 
 Context: {context}
 
@@ -364,51 +486,66 @@ Transcript:
 {text}
 
 Instructions:
-- Preserve agenda structure and procedural detail.
-- Include all motions and votes mentioned.
-- Retain attribution when explicit.
-- Group content under meaningful **bold headers**.
-- Include ordinance/resolution numbers when present.
-- Capture debate and public sentiment.
-- Maintain neutral tone.
-- Exclude editorializing.
-- Use **plain Arabic numerals** consistently.
-- Output clean markdown suitable for final synthesis.
+- Consolidate all agenda items, discussion points, motions, votes, and public comments into one authoritative record.
+- Preserve **factual details**; Consolidate duplicates only where content overlaps.
+- Include vote outcomes exactly as stated. If a roll call vote is present, list each individual vote if included.
+- Retain explicit speaker attribution whenever available. Refer to unnamed speakers generically (e.g., 'a resident said...').
+- Keep resolution and ordinance numbers, and include only what the transcript explicitly states about them.
+- Maintain the original agenda item order. Only reorder entries when necessary to merge duplicates accurately.
+- Capture public sentiment and discussion accurately without editorializing or inferring intent beyond what is explicitly stated.
+- Use clear, informative section headers. Use original agenda item titles when possible; create dedicated sections for Public Comments and Follow-ups / Action Items.
+- Format in clean, readable Markdown using headers (1–6) and bullet points.
+- Remove only repeated meeting titles, headers, or segment markers. Keep all factual content intact.
+
+Output: A single, internally consistent Markdown summary suitable as the canonical record of the meeting. Do not include explanations or additional commentary.
 """
 
 [prompts.civic_scan]
 text = """
-You produce concise, high-impact civic summaries.
+You are a data synthesizer. Your task is to merge multiple summaries of a single meeting into ONE factual Markdown narrative.
 
-Context: {context}
+**Context:** {context}
 
-Transcript:
+**Transcript:**
 {text}
 
-Instructions:
-- Output markdown only.
-- Use **bold headers** for all sections.
-- Use **plain Arabic numerals** for numbered items.
-- Do not refer to agenda items by number alone.
-- Allowed headers:
-  1. Ordinances and Resolutions
-  2. Contracts and Spending
-  3. Property and Development
-  4. Appointments
-  5. Public Comment
-  6. Budget and Finance
-  7. Other Discussion
-- Capture every motion and vote, including procedural attempts.
-- Preserve vote sequences and procedural history.
-- Flag items involving money, property, appointments, or controversy.
-- Include brief quotes only if expressing sentiment or disagreement.
-- Exclude filler unless it affects accountability or transparency.
-- Use they/them pronouns unless gender is explicit.
+**Instructions:**
+- **CRITICAL:** Never refer to an item by number alone (e.g., 'Item 4'). Always provide the topic (e.g., 'Item 4: [Agenda Topic Name]').
+- Include a factual attendees list (e.g., - Name (Role)) from the current transcripts.
+- Use original agenda item titles when possible; Group content under topical headers.
+- Use only the following section headers when applicable:
+    1. Ordinances and Resolutions
+    2. Contracts and Spending
+    3. Property and Development
+    4. Appointments
+    5. Public Comment
+    6. Other Discussion
+- If a vote outcome is mentioned anywhere in the transcript, it must be included.
+- Capture **all motions and votes**, including failed votes, first readings, deferrals, and procedural attempts.
+- Keep each attempt distinct, even if a later vote passes the item. Show the sequence of first reading, second reading, and final vote.
+- Include motions, who made and seconded them, and vote outcomes for every vote mentioned.
+- Do not collapse repeated votes into a single final outcome. Preserve the full procedural history if possible.
+- Focus on civic impact such as; ordinance changes, grant activity, public funding, zoning decisions, infrastructure/budget items, emotionally charged issues, controversies, and unresolved matters if presented.
+- Include **brief quotes** when they express public sentiment, concern, or disagreement.
+- Flag votes, funding amounts, appointments, and any item likely to impact residents or warrant follow-up.
+- Exclude filler or procedural commentary unless it affects transparency, accountability, or trust.
+- Treat the following as high-priority if present, in this order:
+    1. Ordinances and resolutions
+    2. Votes involving money, property, or contracts
+    3. Appointments or removals
+    4. Public comments expressing concern or disagreement
+    5. Deferred or unresolved items
+- Use **they/them pronouns** unless gender is clearly stated.
+- Be consistent and avoid repeating section headers by merging topics.
+- **Do NOT include any internal notes, meta-commentary, explanations of how this summary was created, or references to the summarization process.**
+- Use **plain Arabic numerals (1, 2, 3...)** for section headers. **Do not use Roman numerals.**
+- Do not infer, speculate, or bridge gaps; if a motion-maker or vote-tally is missing from the input, state 'unknown' or 'not specified' rather than attributing it to a nearby name.
+- Output valid **ATX-style Markdown** consisting only of section headers and factual bullet points strictly derived from the transcripts.
 """
 
 [prompts.final_pass_detailed]
 text = """
-You synthesize all summaries into a final unified markdown report.
+You are a data synthesizer. Your task is to merge all input summaries into ONE comprehensive, factual Markdown narrative.
 
 Context: {context}
 
@@ -420,7 +557,6 @@ Instructions:
 - Preserve every motion, vote, procedural outcome.
 - Retain ordinance numbers, titles, amounts, contractors, agencies.
 - Consolidate discussion with final outcomes.
-- Include a final Motions and Votes Summary section.
 - Summarize public comments clearly.
 - Attribute remarks only when explicit.
 - Disambiguate individuals with shared surnames.

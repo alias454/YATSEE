@@ -74,6 +74,7 @@ Example Usage:
 
 # Standard library
 import argparse
+import gc
 import json
 import logging
 import os
@@ -83,6 +84,7 @@ import textwrap
 from typing import Any, Dict, List, Set
 
 # Third-party imports
+import mdformat
 import requests
 import toml
 import yaml
@@ -294,12 +296,15 @@ def estimate_token_count(text: str) -> int:
     """
     Estimate the token count of a string for LLM usage.
 
-    Uses an average ratio of 0.75 words per token as heuristic.
+    Heuristic: most tokens are roughly 4–5 characters including punctuation and spaces.
 
     :param text: Input text
     :return: Estimated token count (integer)
     """
-    return int(len(text.split()) / 0.75)
+    # Remove extra whitespace
+    text = re.sub(r"\s+", " ", text)
+    # 1 token per ~4 chars
+    return max(1, len(text) // 4)
 
 
 def calculate_cost_openai_gpt4o(input_tokens: int, output_tokens: int) -> float:
@@ -325,81 +330,106 @@ def calculate_cost_openai_gpt4o(input_tokens: int, output_tokens: int) -> float:
 
 def prepare_text_chunk(text: str, max_tokens: int = 2500, overlap_tokens: int | None = None) -> List[str]:
     """
-    Split a large text into overlapping token-based chunks for LLM processing.
+    Split a large text into overlapping chunks sized using a token-budget heuristic.
 
-    Useful when the text exceeds the model context limit. Overlapping chunks
-    preserve continuity so that summaries or embeddings capture context across
-    boundaries. Sliding window size is determined by max_tokens and optional
-    overlap.
+    This function performs word-based chunking while approximating token limits
+    using a fixed conversion ratio (≈0.75 words per token). It is designed for
+    context window safety and deterministic chunk boundaries are important.
+
+    Overlapping chunks preserve continuity across boundaries so that summaries,
+    embeddings, or downstream analyses retain local context. Chunk size and
+    overlap are derived from the provided token budget and converted to word
+    counts internally.
 
     :param text: Input text string to chunk
-    :param max_tokens: Maximum number of tokens per chunk
+    :param max_tokens: Approximate maximum token budget per chunk
+        (converted to words using a fixed heuristic)
     :param overlap_tokens: Number of tokens to repeat from previous chunk;
         defaults to min(10% of max_tokens, 800)
     :return: List of string chunks, each within token limits, preserving overlap
     """
-    if overlap_tokens is None:
-        overlap_tokens = min(int(max_tokens * 0.1), 800)  # max 800 tokens overlap
+    words = text.split()
+    max_words = int(max_tokens * 0.75)
 
-    tokens = text.split()
-    total_tokens = len(tokens)
-
-    if total_tokens <= max_tokens:
+    # Fast path
+    if len(words) <= max_words:
         return [text]
+
+    if overlap_tokens is None:
+        overlap_tokens = min(int(max_tokens * 0.1), 800)
+
+    overlap_words = int(overlap_tokens * 0.75)
 
     chunks = []
     start = 0
 
-    while start < total_tokens:
-        end = min(start + max_tokens, total_tokens)
-        chunk_tokens = tokens[start:end]
-        chunk_text = " ".join(chunk_tokens)
-        chunks.append(chunk_text)
+    while start < len(words):
+        end = min(start + max_words, len(words))
+        chunks.append(" ".join(words[start:end]))
 
-        if end == total_tokens:
+        if end == len(words):
             break
 
-        # Slide window by max_tokens - overlap_tokens to keep overlap
-        start += max_tokens - overlap_tokens
-        if start < 0:
-            start = 0
+        start += max_words - overlap_words
 
     return chunks
 
 
-def prepare_text_chunk_sentence(text: str, max_tokens: int = 3000) -> list[str]:
+def prepare_text_chunk_sentence(text: str, max_tokens: int = 2500, overlap_tokens: int | None = None) -> list[str]:
     """
     Split text into sentence-aligned chunks while staying under a token limit.
 
-    This is preferred when semantic coherence matters — sentence boundaries
-    are respected to avoid splitting mid-thought. The function first estimates
-    token count; if text fits in one chunk, returns immediately.
+    This preserves semantic coherence — no sentence is split across chunks.
+    Chunks overlap by a configurable token count (converted to sentence count),
+    so context is maintained across chunk boundaries.
 
     :param text: Input transcript text
     :param max_tokens: Approximate maximum tokens per chunk
-    :return: List of sentence-aligned chunks ready for model consumption
+    :param overlap_tokens: Number of tokens to repeat from previous chunk;
+        defaults to min(10% of max_tokens, 800)
+    :return: List of sentence-aligned chunks
     """
-    # Fast path: skip chunking if the text fits in one chunk
+    # Fast path: skip chunking if text fits
     if int(len(text.split()) / 0.75) <= max_tokens:
         return [text]
 
     # Split text into sentences
     sentences = re.split(r'(?<=[.?!])\s+', text)
 
+    # Determine overlap in words
+    if overlap_tokens is None:
+        overlap_tokens = min(int(max_tokens * 0.1), 800)
+    overlap_words = int(overlap_tokens / 0.75)
+
     chunks = []
     current_chunk = []
     current_word_count = 0
+    i = 0
 
-    for sentence in sentences:
+    while i < len(sentences):
+        sentence = sentences[i]
         sentence_word_count = len(sentence.split())
 
+        # If adding this sentence would exceed max_tokens, finalize the chunk
         if current_word_count + sentence_word_count > max_tokens and current_chunk:
             chunks.append(" ".join(current_chunk))
-            current_chunk = []
-            current_word_count = 0
+
+            # Prepare next chunk with sentence-level overlap
+            # Count words backward to satisfy overlap_words
+            overlap_chunk = []
+            overlap_count = 0
+            for s in reversed(current_chunk):
+                overlap_chunk.insert(0, s)
+                overlap_count += len(s.split())
+                if overlap_count >= overlap_words:
+                    break
+
+            current_chunk = overlap_chunk
+            current_word_count = sum(len(s.split()) for s in current_chunk)
 
         current_chunk.append(sentence)
         current_word_count += sentence_word_count
+        i += 1
 
     if current_chunk:
         chunks.append(" ".join(current_chunk))
@@ -423,13 +453,18 @@ def summarize_transcript(session: requests.Session, llm_provider_url: str, model
     :return: Generated summary text
     :raises RuntimeError: If the HTTP request fails or streaming JSON is malformed
     """
+    # If negative, use -1 to let model handle max tokens internally.
+    prompt_tokens = estimate_token_count(prompt)
+    num_predict = max(-1, num_ctx - prompt_tokens - 1)
+
     # payload = {"model": model, "prompt": prompt}
     payload = {
         "model": model,
         "prompt": prompt,
         "temperature": 0.2,
         "options": {
-            "num_ctx": num_ctx
+            "num_ctx": num_ctx,
+            "num_predict": num_predict  # Reserve context for prompt
         }
     }
 
@@ -474,14 +509,16 @@ def write_summary_file(summary: str, basename: str, output_dir: str, fmt: str = 
 
     with open(out_path, "w", encoding="utf-8") as f:
         if fmt == "markdown":
-            f.write(f"# Summary: {basename}\n\n{summary.strip()}\n")
+            md_content = f"# Summary: {basename}\n\n{summary.strip()}\n"
+            clean_md = mdformat.text(md_content, options={"number": True})
+            f.write(clean_md)
         else:
             yaml.safe_dump({"summary": summary}, f, sort_keys=False)
 
     return out_path
 
 
-def write_chunk_files(chunks: List[str], output_dir: str, meeting_type: str, base_name: str) -> List[str]:
+def write_chunk_files(chunk_text: str, output_dir: str, meeting_type: str, base_name: str, pass_num: int, chunk_id: int) -> str:
     """
     Save text chunks to structured directories by meeting type and base name.
 
@@ -489,25 +526,24 @@ def write_chunk_files(chunks: List[str], output_dir: str, meeting_type: str, bas
     Directory is automatically created if it does not exist. Returns a list
     of all written file paths.
 
-    :param chunks: List of text chunks to save
+    :param chunk_text: Summarized chunk text
     :param output_dir: Root directory for chunk storage
     :param meeting_type: Subdirectory label, e.g., 'city_council'
     :param base_name: Base filename prefix for all chunk files
+    :param pass_num: loop pass number 1,2,3 etc
+    :param chunk_id: ID of chunk to append to filename
     :return: List of full paths of all chunk files
     :raises OSError, IOError: If any chunk file cannot be written
     """
-    chunks_path = os.path.join(output_dir, "chunks", meeting_type, base_name)
-    os.makedirs(chunks_path, exist_ok=True)
+    chunk_path = os.path.join(output_dir, "chunks", base_name, meeting_type, f"pass_{pass_num}")
+    os.makedirs(chunk_path, exist_ok=True)
 
-    written_files = []
-    for idx, chunk_text in enumerate(chunks):
-        chunk_filename = f"{base_name}_part{idx:02d}.txt"
-        chunk_path = os.path.join(chunks_path, chunk_filename)
-        with open(chunk_path, "w", encoding="utf-8") as f:
-            f.write(chunk_text)
-        written_files.append(chunk_path)
+    chunk_filename = f"{base_name}_part{chunk_id:02d}.txt"
+    chunk_file = os.path.join(chunk_path, chunk_filename)
+    with open(chunk_file, "w", encoding="utf-8") as f:
+        f.write(chunk_text)
 
-    return written_files
+    return chunk_file
 
 
 def generate_known_speakers_context(speaker_matches: dict) -> List[str] | str:
@@ -674,27 +710,27 @@ def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent("""
-        Requirements:
-          - Python 3.10+
-          - Ollama CLI installed and models pulled locally
-          - Input transcripts must be .txt or .out files
+            Requirements:
+              - Python 3.10+
+              - Ollama CLI installed and models pulled locally
+              - Input transcripts must be .txt or .out files
 
-        Features:
-          - Automatic classification of meeting type (city_council, finance_committee, etc.)
-          - Dynamic prompt selection per meeting type
-          - Manual prompt override for custom workflows
-          - Recursive multi-pass summarization for long transcripts (default: 3 passes)
-          - Optional disabling of auto-classification
-          - Output in YAML or Markdown
-          - Fully local and privacy-respecting
+            Features:
+              - Automatic classification of meeting type (city_council, finance_committee, etc.)
+              - Dynamic prompt selection per meeting type
+              - Manual prompt override for custom workflows
+              - Recursive multi-pass summarization for long transcripts (default: 3 passes)
+              - Optional disabling of auto-classification
+              - Output in YAML or Markdown
+              - Fully local and privacy-respecting
 
-        Example usage:
-          python yatsee_summarize_transcripts.py -e defined_entity
-          python yatsee_summarize_transcripts.py --model llama3:latest -i normalized/ --context "City Council - June 2025"
-          python yatsee_summarize_transcripts.py -m mistral:latest -i transcripts/ -o summaries/ --output-format markdown
-          python yatsee_summarize_transcripts.py -m gemma:2b -i finance/ --disable-auto-classification --first-prompt detailed
-    """)
-)
+            Usage Examples:
+              python yatsee_summarize_transcripts.py -e defined_entity
+              python yatsee_summarize_transcripts.py --model llama3:latest -i normalized/ --context "City Council - June 2025"
+              python yatsee_summarize_transcripts.py -m mistral:latest -i transcripts/ -o summaries/ --output-format markdown
+              python yatsee_summarize_transcripts.py -m gemma:2b -i finance/ --disable-auto-classification --first-prompt detailed
+        """)
+    )
     parser.add_argument("-e", "--entity", help="Entity handle to process")
     parser.add_argument("-c", "--config", default="yatsee.toml", help="Path to global yatsee.toml")
     parser.add_argument("-i", "--txt-input", help="Path to a transcript file or directory (supports .txt or .out)")
@@ -702,8 +738,9 @@ def main():
     parser.add_argument("-m", "--model", help="Local Ollama model name (e.g. 'llama3:latest', 'mistral:latest', 'mistral-nemo:latest', gemma:2b)")
     parser.add_argument("-f", "--output-format", choices=["markdown", "yaml"], default="markdown", help="Summary output format (Default: markdown)")
     parser.add_argument("-j", "--job-type", choices=["summary", "research"], default="summary", help="Define job type to select prompt workflow (default: summary)")
-    parser.add_argument("-w", "--max-words", type=int, help="Word count threshold for chunking transcript (default: 3500)")
-    parser.add_argument("-t", "--max-tokens", type=int, help="Approximate max tokens per chunk (Default: 2500)")
+    parser.add_argument("-s", "--chunk-style", choices=["word", "sentence"], default="word", help="Chunking method: 'word' or 'sentence' (default: word)")
+    parser.add_argument("-w", "--max-words", type=int, help="Word count threshold for chunking transcript. Converted to --max-tokens (default: 3500)")
+    parser.add_argument("-t", "--max-tokens", type=int, help="Approximate max tokens per chunk. Overrides --max-words (Default: 2500)")
     parser.add_argument("-p", "--max-pass", type=int, default=3, help="Max iterations for multi-pass summarization (default: 3)")
     parser.add_argument("-d", "--disable-auto-classification", action="store_true", help="Disable automatic meeting type classification. Requires manual prompt overrides")
     parser.add_argument("--first-prompt", help="Prompt type for first pass (only used when auto-classification is disabled)")
@@ -711,6 +748,7 @@ def main():
     parser.add_argument("--final-prompt", help="Prompt type for final pass summarization (only used when auto-classification is disabled)")
     parser.add_argument("--context", default="", help="Optional context string to guide summarization (e.g., 'City Council - June 2025')")
     parser.add_argument("--print-prompts", action="store_true", help="Print all prompt templates for job type and exit")
+    parser.add_argument("--enable-chunk-writer", action="store_true", help="Write multi-stage output chunks for debugging")
     args = parser.parse_args()
 
     # Determine input/output paths
@@ -826,9 +864,22 @@ def main():
         logger.info("Output directory will be created: %s", output_dir)
         os.makedirs(output_dir, exist_ok=True)
 
-    # Now model_key matches the exact key in config
-    max_tokens = args.max_tokens or model_map[model_key].get("max_tokens", 3500)
+    # Derive max_tokens from words if provided
+    if args.max_words and not args.max_tokens:
+        # Approximate: 1 token ≈ 0.75 words
+        max_tokens = int(args.max_words / 0.75)
+        logger.info("Derived max_tokens=%d from max_words=%d", max_tokens, args.max_words)
+    else:
+        # Now model_key matches the exact key in config
+        max_tokens = args.max_tokens or model_map[model_key].get("max_tokens", 2500)
+        logger.info("Using max_tokens=%d", max_tokens)
+
+    # Clamp to model context just in case
     num_ctx = model_map[model_key].get("num_ctx", 8192)
+    logger.info("Context set to (%d) limit", num_ctx)
+    if max_tokens >= num_ctx:
+        logger.error("Chunk size (%d) plus system prompt exceeds model context (%d). Reduce max_tokens.",max_tokens, num_ctx)
+        return 1
 
     # Open up a request object and setup the client connection
     # Create a global or shared session object once
@@ -890,28 +941,19 @@ def main():
             while pass_num <= max_pass:
                 # Select prompt type: first pass uses 'prompt_type_first', subsequent use 'prompt_type_second'
                 prompt_type = first_pass_id if pass_num == 1 else multi_pass_id
-
-                # Writing chunk files
-                enable_chunk_writer = False
-                if enable_chunk_writer:
-                    # Prepare transcript for RAG if chunk writer enabled
-                    # This will use half the max tokens per chunk with about 16.7% overlap
-                    chunks = prepare_text_chunk(transcript, int(args.max_tokens / 2), int(args.max_tokens / 6))
-                    try:
-                        chunk_files = write_chunk_files(chunks, output_dir, meeting_type, base_name)
-                        logger.info("Wrote %d chunks to %s", len(chunk_files), os.path.join(output_dir, "chunks", meeting_type))
-                    except Exception as e:
-                        logger.error("Error writing chunk files: %s", e)
-
-                chunks_only = False
-                if chunks_only:
-                    break  # exit the while loop
+                if prompt_type not in PROMPTS:
+                    logger.critical("CONFIG FATAL: The requested prompt '%s' is not in loaded prompts file.",prompt_type)
+                    logger.info("   Available prompts: %s", ", ".join(sorted(PROMPTS.keys())))
+                    return 1
 
                 # Prepare transcript for summarization by chunking contents if necessary
                 # If text too large to summarize in one call, break into chunks and summarize each chunk
-                chunks = prepare_text_chunk(transcript, max_tokens=max_tokens)
-                chunk_summaries = []
+                if args.chunk_style == "sentence":
+                    chunks = prepare_text_chunk_sentence(transcript, max_tokens=max_tokens)
+                else:  # default or "word"
+                    chunks = prepare_text_chunk(transcript, max_tokens=max_tokens)
 
+                chunk_summaries = []
                 count = 0
                 for chunk in chunks:
                     count += 1
@@ -920,7 +962,6 @@ def main():
                     # The context is in the file but with each chunk the llm looses context so add some back
                     speaker_matches = scan_transcript_for_names(chunk, known_speakers_permutations)
                     speaker_context = generate_known_speakers_context(speaker_matches)
-                    chunk = speaker_context + "\n\n" + chunk
 
                     # for person, hits in speaker_matches.items():
                     #     print(f"{person}: {sorted(hits)}")
@@ -929,43 +970,52 @@ def main():
                     # print(speaker_context)
                     # print("\n")
 
-                    # Summarize each chunk using the main prompt
-                    prompt_template = PROMPTS.get(prompt_type, PROMPTS["detailed"])
-                    chunk_prompt = prompt_template.format(context=context or "No context provided.", text=chunk)
+                    # Summarize each chunk using the prompt
+                    prompt_template = PROMPTS.get(prompt_type)
+                    chunk_prompt = prompt_template.format(
+                        context=context or "No context provided.",
+                        text=f"{speaker_context}\n\n{chunk}"
+                    )
 
                     chunk_summary = summarize_transcript(llm_session, llm_provider_url, model, chunk_prompt, num_ctx)
                     chunk_summaries.append(chunk_summary)
 
+                    # Writing chunk files for debugging
+                    if args.enable_chunk_writer:
+                        try:
+                            chunk_files = write_chunk_files(chunk_summary, output_dir, meeting_type, base_name, pass_num, count)
+                            logger.info("Wrote chunk to %s", chunk_files)
+                        except Exception as e:
+                            logger.error("Error writing chunk files: %s", e)
+
                     # Update token usage counts
-                    token_usage += estimate_token_count(chunk)
+                    token_usage += estimate_token_count(chunk_prompt)
                     output_token_usage += estimate_token_count(chunk_summary)
                 # End for loop
 
                 # Combine chunk summaries into a single string for final summarization
-                summary = "\n\n".join(chunk_summaries)
+                transcript = "\n\n".join(chunk_summaries)
 
                 # If summary is small enough or this is the last pass, finalize and exit loop
                 if pass_num >= 2:
-                    if estimate_token_count(summary) <= max_tokens or len(chunk_summaries) == 1 or pass_num == max_pass:
+                    if estimate_token_count(transcript) <= max_tokens or len(chunk_summaries) == 1 or pass_num == max_pass:
                         logger.info("Processing final summary with prompt [%s]", final_pass_id)
-                        prompt_template = PROMPTS.get(final_pass_id, PROMPTS["detailed"])
-                        final_prompt = prompt_template.format(context=context or "No context provided.", text=summary)
+                        prompt_template = PROMPTS.get(final_pass_id)
+                        final_prompt = prompt_template.format(context=context or "No context provided.", text=transcript)
 
-                        transcript = summarize_transcript(llm_session, llm_provider_url, model, final_prompt, num_ctx)
+                        summary = summarize_transcript(llm_session, llm_provider_url, model, final_prompt, num_ctx)
 
                         # Update token usage counts
-                        token_usage += estimate_token_count(transcript)
-                        output_token_usage += estimate_token_count(transcript)
+                        token_usage += estimate_token_count(final_prompt)
+                        output_token_usage += estimate_token_count(summary)
                         break
 
                 # Increment pass number and repeat loop
-                transcript = summary
                 pass_num += 1
-            # End while loop
 
-            chunks_only = False
-            if chunks_only:
-                continue # continue to next file
+                # Clean up
+                gc.collect()
+            # End while loop
 
             # Calculate total tokens used and estimate API cost
             total_tokens = token_usage + output_token_usage
@@ -980,12 +1030,10 @@ def main():
             # ----------------------------
             if args.job_type == "summary":
                 try:
-                    # After all passes or break condition, final_summary is stored in transcript variable
-                    final_summary = transcript
-
-                    summary_file = write_summary_file(final_summary, base_name, output_dir, args.output_format)
+                    # After all passes or break condition transcript is written
+                    summary_file = write_summary_file(summary, base_name, output_dir, args.output_format)
                     logger.debug("\nFinal Summary:\n")
-                    logger.debug(final_summary)
+                    logger.debug(summary)
                     logger.info("Final summary written to: %s\n", summary_file)
                 except Exception as e:
                     logger.error("Failed to write summary file: %s", e)
