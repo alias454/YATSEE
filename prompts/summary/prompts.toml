@@ -51,6 +51,31 @@ Return only the classification value as plain text. Do not include explanations 
 """
 
 # =========================
+# YATSEE Density chunk boundry keyword list
+# =========================
+[density_keywords]
+keywords = [
+    # Motions / voting
+    "motion", "seconded", "vote", "aye", "nay", "abstain",
+    "unanimous", "majority", "minority", "tie", "amend", "withdraw",
+
+    # Procedural / formal
+    "agenda", "committee", "adopt", "pass", "approve", "recommendation",
+    "ordinance", "resolution", "hearing", "session", "council", "clerk",
+
+    # Discussion / debate cues
+    "discussion", "concern", "clarify", "question", "comment",
+    "objection", "issue", "debate", "point", "consideration",
+
+    # Finance / policy
+    "budget", "funding", "grant", "expenditure", "allocation", "tax",
+    "project", "proposal", "contract", "bid", "agreement", "procurement",
+
+    # Reports / presentation
+    "presentation", "report", "update", "summary", "review", "overview"
+]
+
+# =========================
 # YATSEE Prompt Templates
 # =========================
 [prompts.action_items]
