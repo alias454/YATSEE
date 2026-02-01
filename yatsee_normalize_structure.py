@@ -295,7 +295,6 @@ def capitalize_sentences(text: str, preserve_entities: Optional[List[str]] = Non
     return ' '.join(capitalized)
 
 
-
 def normalize_text(text: str, deep: bool = False, preserve_entities: Optional[List[str]] = None) -> str:
     """
     Robust transcript normalization.
@@ -372,7 +371,7 @@ def normalize_text(text: str, deep: bool = False, preserve_entities: Optional[Li
     # CRITICAL: We use (?!\d) to ensure the second group is EXACTLY 3 digits.
     # This prevents merging dates like "March 21, 2025" because 2025 is 4 digits.
     # We run this twice to handle chained numbers (Millions/Billions).
-    large_num_regex = r'(\d{1,3})(?:\s*,\s*|\s+)(\d{3})(?!\d)'
+    large_num_regex = r'(\d{1,3})(?:,\s+|\s+,|\s+)(\d{3})(?!\d)'
     text = re.sub(large_num_regex, r'\1,\2', text)
     text = re.sub(large_num_regex, r'\1,\2', text)
 
