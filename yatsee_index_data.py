@@ -55,6 +55,7 @@ import numpy as np
 import spacy
 import torch
 import toml
+from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
@@ -523,7 +524,8 @@ def main() -> int:
     logger.info("Loaded %d video IDs", len(id_map))
 
     chroma_path = os.path.join(entity_cfg["data_path"], "yatsee_db")
-    client = chromadb.PersistentClient(path=chroma_path)
+    # Disable anonymous telemetry https://docs.trychroma.com/docs/overview/oss#telemetry
+    client = chromadb.PersistentClient(path=chroma_path, settings=Settings(anonymized_telemetry=False))
     collection = client.get_or_create_collection(name="council_knowledge", metadata={"hnsw:space": "cosine"})
 
     # ------------------

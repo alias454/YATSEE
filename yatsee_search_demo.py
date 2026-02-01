@@ -24,6 +24,7 @@ import sys
 import chromadb
 import streamlit as st
 import toml
+from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
 parser = argparse.ArgumentParser(description="Yatsee Search")
@@ -186,14 +187,14 @@ DOWNLOAD_TRACKER = os.path.join(data_path, "downloads", ".downloaded")
 TOP_K = 25
 SNIPPET_CHARS = 350
 MIN_SNIPPET_LENGTH = 50
-SUMMARY_BOOST = 0.0
+SUMMARY_BOOST = 0.025
 MIN_SCORE = 0.3
 
 # ============================================================================
 # CACHED RESOURCES (MODELS, DB, LOOKUPS)
 # ============================================================================
 @st.cache_resource
-def load_model(embedding_model: str) -> SentenceTransformer:
+def load_model(embedding_model: str, device: str = "cuda") -> SentenceTransformer:
     """
     Load and cache the sentence embedding model.
 
@@ -203,8 +204,7 @@ def load_model(embedding_model: str) -> SentenceTransformer:
     - Device placement (CPU/GPU) should be stable
     """
     with st.spinner(f"⚡ Loading AI Engine ({embedding_model})..."):
-        return SentenceTransformer(embedding_model, device="cuda")
-embedder = load_model(MODEL_NAME)
+        return SentenceTransformer(embedding_model, device=device)
 
 
 @st.cache_resource
@@ -214,7 +214,8 @@ def get_chroma_collection():
 
     Cached to avoid reconnecting or reloading metadata on every query.
     """
-    client = chromadb.PersistentClient(path=CHROMA_PATH)
+    # Disable anonymous telemetry https://docs.trychroma.com/docs/overview/oss#telemetry
+    client = chromadb.PersistentClient(path=CHROMA_PATH, settings=Settings(anonymized_telemetry=False))
     return client.get_collection(name=COLLECTION_NAME)
 
 
@@ -658,7 +659,7 @@ def run_search():
 
     st.session_state.last_query = query_text
     st.session_state.viewing_transcript = None
-    st.session_state.search_results = run_search_pipeline(query_text, rerank_strategy="literal")
+    st.session_state.search_results = run_search_pipeline(query_text, rerank_strategy="hybrid")
 
 
 # ==========================================
@@ -860,6 +861,8 @@ def render_search_view(summaries):
 # ==========================================
 st.title("🏛️ Yatsee Research Engine")
 st.info("⚠️ **Research Preview:** Summaries are AI-generated. Verify important details against the canonical transcript or recording.")
+
+embedder = load_model(MODEL_NAME)
 
 # --- Session state init ---
 init_session_state()
