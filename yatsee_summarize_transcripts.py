@@ -21,6 +21,7 @@ Key Features:
   - Automatic classification of meeting type using transcript content
     and optional filename heuristics
   - Multi-pass summarization pipeline with configurable depth (--max-pass)
+  - Choose chunking boundry style from word, sentence, or density
   - Modular prompt system for different summary styles:
       * overview, action_items, detailed, more_detailed, most_detailed,
         final_pass_detailed
@@ -64,7 +65,7 @@ Example Usage:
       --context "Fire Hall Proposal Discussion" \
       --output-format markdown
 
-  python yatsee_summarize_transcripts.py --model gemma:2b \
+  python yatsee_summarize_transcripts.py --model gemma \
       -i finance_committee_2025_05 \
       --disable-auto-classification \
       --first-prompt overview \
@@ -112,7 +113,7 @@ def classify_meeting(session: requests.Session, llm_provider_url: str, model: st
 
     payload = {"model": model, "prompt": prompt, "stream": False}
     try:
-        response = session.post(f"{llm_provider_url}/api/generate", json=payload, timeout=30)
+        response = session.post(f"{llm_provider_url}/api/generate", json=payload, timeout=300)
         response.raise_for_status()
 
         data = response.json()
@@ -328,7 +329,7 @@ def calculate_cost_openai_gpt4o(input_tokens: int, output_tokens: int) -> float:
     return round(input_cost + output_cost, 4)
 
 
-def prepare_text_chunk(text: str, max_tokens: int = 2500, overlap_tokens: int | None = None) -> List[str]:
+def prepare_text_chunk_word(text: str, max_tokens: int = 2500, overlap_tokens: float | None = None) -> List[str]:
     """
     Split a large text into overlapping chunks sized using a token-budget heuristic.
 
@@ -355,11 +356,6 @@ def prepare_text_chunk(text: str, max_tokens: int = 2500, overlap_tokens: int | 
     if len(words) <= max_words:
         return [text]
 
-    if overlap_tokens is None:
-        overlap_tokens = min(int(max_tokens * 0.1), 800)
-
-    overlap_words = int(overlap_tokens * 0.75)
-
     chunks = []
     start = 0
 
@@ -370,66 +366,152 @@ def prepare_text_chunk(text: str, max_tokens: int = 2500, overlap_tokens: int | 
         if end == len(words):
             break
 
+        # Overlap calculation per chunk
+        current_chunk_words = end - start
+
+        # Overlap: dynamically 10% of the previous chunk tokens
+        overlap_words = min(int(current_chunk_words * 0.1), 600) if overlap_tokens is None else int(overlap_tokens * 0.75)
+
         start += max_words - overlap_words
 
     return chunks
 
 
-def prepare_text_chunk_sentence(text: str, max_tokens: int = 2500, overlap_tokens: int | None = None) -> list[str]:
+def prepare_text_chunk_sentence(text: str, max_tokens: int = 2500, overlap_tokens: float | None = None) -> list[str]:
     """
     Split text into sentence-aligned chunks while staying under a token limit.
 
-    This preserves semantic coherence — no sentence is split across chunks.
-    Chunks overlap by a configurable token count (converted to sentence count),
-    so context is maintained across chunk boundaries.
+    Uses token-based estimation instead of word counts, so chunk sizes are more realistic
+    for LLM usage. Preserves semantic coherence and optionally overlaps chunks by a
+    fraction of the current chunk size or a fixed token count.
 
     :param text: Input transcript text
     :param max_tokens: Approximate maximum tokens per chunk
     :param overlap_tokens: Number of tokens to repeat from previous chunk;
-        defaults to min(10% of max_tokens, 800)
+        defaults to ~10% of the current chunk size or max 800
     :return: List of sentence-aligned chunks
     """
     # Fast path: skip chunking if text fits
     if int(len(text.split()) / 0.75) <= max_tokens:
         return [text]
 
-    # Split text into sentences
+    # Sentence split
     sentences = re.split(r'(?<=[.?!])\s+', text)
-
-    # Determine overlap in words
-    if overlap_tokens is None:
-        overlap_tokens = min(int(max_tokens * 0.1), 800)
-    overlap_words = int(overlap_tokens / 0.75)
+    sentences = [s.strip() for s in sentences if s.strip()]
 
     chunks = []
     current_chunk = []
-    current_word_count = 0
+    current_tokens = 0
     i = 0
 
     while i < len(sentences):
         sentence = sentences[i]
-        sentence_word_count = len(sentence.split())
+        sentence_tokens = estimate_token_count(sentence)
 
-        # If adding this sentence would exceed max_tokens, finalize the chunk
-        if current_word_count + sentence_word_count > max_tokens and current_chunk:
+        if current_tokens + sentence_tokens > max_tokens and current_chunk:
             chunks.append(" ".join(current_chunk))
 
-            # Prepare next chunk with sentence-level overlap
-            # Count words backward to satisfy overlap_words
+            # Overlap: dynamically 10% of the previous chunk tokens
+            overlap_tokens_dynamic = min(int(current_tokens * 0.1), 600) if overlap_tokens is None else overlap_tokens
             overlap_chunk = []
-            overlap_count = 0
+            ov_tokens = 0
             for s in reversed(current_chunk):
                 overlap_chunk.insert(0, s)
-                overlap_count += len(s.split())
-                if overlap_count >= overlap_words:
+                ov_tokens += estimate_token_count(s)
+                if ov_tokens >= overlap_tokens_dynamic:
                     break
 
             current_chunk = overlap_chunk
-            current_word_count = sum(len(s.split()) for s in current_chunk)
+            current_tokens = sum(estimate_token_count(s) for s in current_chunk)
 
         current_chunk.append(sentence)
-        current_word_count += sentence_word_count
+        current_tokens += sentence_tokens
         i += 1
+
+    if current_chunk:
+        chunks.append(" ".join(current_chunk))
+
+    return chunks
+
+
+def prepare_text_chunk_density(text: str, max_tokens: int = 2500, overlap_tokens: float | None = None, density_keywords: set[str] | None = None, density_threshold: int = 25, density_exponent: float = 1.0) -> List[str]:
+    """
+    Split text into chunks that adjust dynamically based on content density,
+    while staying under an estimated token limit.
+
+    If density_keywords is empty or None:
+        - Behavior matches prepare_text_chunk_sentence exactly.
+
+    If keywords are provided:
+        - Each sentence gets a density score based on keyword hits.
+
+    Sentences are never split, preserving readability and semantic coherence.
+    Chunk size is reduced in sections with a high concentration of density keywords,
+    allowing finer-grained analysis of complex or action-heavy passages.
+    Optional overlap ensures continuity between chunks.
+
+    :param text: Input transcript or text to be chunked
+    :param max_tokens: Target maximum tokens per chunk under normal density
+    :param overlap_tokens: Number of tokens repeated from the end of the previous chunk;
+        defaults to 10% of max_tokens if not specified
+    :param density_keywords: List of keywords to look for that increase information density.
+    :param density_threshold: Density score at which chunk size reduction begins (Higher values are less impact)
+    :param density_exponent: Exponent controlling how sharply chunk size decreases
+        as density rises; higher values produce smaller chunks for dense text
+    :return: List of sentence-aligned, density-aware text chunks
+    """
+    # Sentence split
+    sentences = re.split(r'(?<=[.?!])\s+', text)
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    # Density regex
+    keyword_pattern = None
+    if density_keywords:
+        escaped = [re.escape(k) for k in density_keywords]
+        keyword_pattern = re.compile(rf"(?<!\w)({'|'.join(escaped)})(?!\w)", re.IGNORECASE)
+
+    chunks = []
+    current_chunk = []
+    current_tokens = 0
+    accumulated_density = 0
+
+    for sentence in sentences:
+        # Estimate tokens for this sentence
+        sentence_tokens = estimate_token_count(sentence)
+
+        # Count density hits
+        sentence_density = len(keyword_pattern.findall(sentence)) if keyword_pattern else 0
+
+        current_chunk.append(sentence)
+        current_tokens += sentence_tokens
+        accumulated_density += sentence_density
+
+        # Compute effective max based on accumulated density
+        if accumulated_density == 0:
+            scale = 1.0
+        else:
+            scale = (density_threshold / accumulated_density) ** density_exponent
+            scale = max(scale, 0.1)
+
+        effective_max = int(max_tokens * scale)
+
+        # Standard flush check using tokens instead of words
+        if current_tokens > effective_max and current_chunk:
+            chunks.append(" ".join(current_chunk))
+
+            # Overlap: calculate as fraction of current chunk tokens
+            overlap_target_tokens = min(int(current_tokens * 0.1), 600) if overlap_tokens is None else overlap_tokens
+            overlap_chunk = []
+            ov_tokens = 0
+            for s in reversed(current_chunk):
+                overlap_chunk.insert(0, s)
+                ov_tokens += estimate_token_count(s)
+                if ov_tokens >= overlap_target_tokens:
+                    break
+
+            current_chunk = overlap_chunk
+            current_tokens = sum(estimate_token_count(s) for s in current_chunk)
+            accumulated_density = sum(len(keyword_pattern.findall(s)) if keyword_pattern else 0 for s in current_chunk)
 
     if current_chunk:
         chunks.append(" ".join(current_chunk))
@@ -546,7 +628,7 @@ def write_chunk_files(chunk_text: str, output_dir: str, meeting_type: str, base_
     return chunk_file
 
 
-def generate_known_speakers_context(speaker_matches: dict) -> List[str] | str:
+def generate_known_speakers_context(speaker_matches: dict) -> str:
     """
     Generate a human-readable summary of known speakers in a transcript chunk.
 
@@ -554,34 +636,42 @@ def generate_known_speakers_context(speaker_matches: dict) -> List[str] | str:
     Highlights canonical names detected and mentions when multiple name
     variants are present.
 
+    Flags ambiguous mentions (e.g., first-name-only matches) and multiple
+    name variants per person.
+
     :param speaker_matches: Mapping of canonical speaker ID to set of matched names
-    :return: Markdown-friendly string describing detected speakers, or empty string
+    :return: Markdown-friendly string describing detected speakers
     """
     if not speaker_matches:
         return ""
 
     descriptive_mentions = []
-    ambiguous_hits = []
+    ambiguous_mentions = []
 
     for canonical_name, matches in speaker_matches.items():
         sorted_matches = sorted(matches, key=len, reverse=True)
         best_variant = sorted_matches[0]
         descriptive_mentions.append(best_variant)
 
-        # Check if multiple name forms were used
+        # Flag if multiple variants exist for this person
         if len(matches) > 1:
-            ambiguous_hits.append((canonical_name, sorted_matches))
+            ambiguous_mentions.append((canonical_name, sorted_matches))
+
+        # Flag first-name-only hits (very ambiguous)
+        first_name_only = [m for m in matches if len(m.split()) == 1 and m.lower() not in canonical_name.lower()]
+        if first_name_only:
+            ambiguous_mentions.append((canonical_name, first_name_only))
 
     mentions_string = ", ".join(descriptive_mentions)
-    context_lines = [f"*Speakers detected in this segment include: {mentions_string}."]
+    context_lines = [f"**Speakers detected in this segment: {mentions_string}.**"]
 
-    if ambiguous_hits:
-        context_lines.append("Some individuals were referenced using multiple name variants, e.g.:")
-        for name, variants in ambiguous_hits:
-            readable = name.replace("_", " ")
-            context_lines.append(f"  - {readable}: {', '.join(variants)}")
+    if ambiguous_mentions:
+        context_lines.append("*Some mentions are ambiguous or used multiple name variants:*")
+        for name, variants in ambiguous_mentions:
+            readable_name = name.replace("_", " ")
+            context_lines.append(f"  - {readable_name}: {', '.join(variants)}")
 
-    context_lines.append("Mentions of partial or ambiguous names may refer to multiple individuals.*")
+    context_lines.append("*Mentions may refer to multiple individuals if only first names are used.*")
     return "\n".join(context_lines)
 
 
@@ -720,15 +810,16 @@ def main():
               - Dynamic prompt selection per meeting type
               - Manual prompt override for custom workflows
               - Recursive multi-pass summarization for long transcripts (default: 3 passes)
+              - Select Chunk boundry style from word, sentence, density
               - Optional disabling of auto-classification
               - Output in YAML or Markdown
               - Fully local and privacy-respecting
 
             Usage Examples:
-              python yatsee_summarize_transcripts.py -e defined_entity
-              python yatsee_summarize_transcripts.py --model llama3:latest -i normalized/ --context "City Council - June 2025"
-              python yatsee_summarize_transcripts.py -m mistral:latest -i transcripts/ -o summaries/ --output-format markdown
-              python yatsee_summarize_transcripts.py -m gemma:2b -i finance/ --disable-auto-classification --first-prompt detailed
+              python yatsee_summarize_transcripts.py -e defined_entity --chunk-style sentence
+              python yatsee_summarize_transcripts.py --model llama3.1:latest -i normalized/ --context "City Council - June 2025"
+              python yatsee_summarize_transcripts.py -m mistral-nemo:latest -i transcripts/ -o summaries/ --output-format markdown
+              python yatsee_summarize_transcripts.py -m gemma3:12b -i finance/ --disable-auto-classification --first-prompt detailed
         """)
     )
     parser.add_argument("-e", "--entity", help="Entity handle to process")
@@ -738,7 +829,7 @@ def main():
     parser.add_argument("-m", "--model", help="Local Ollama model name (e.g. 'llama3:latest', 'mistral:latest', 'mistral-nemo:latest', gemma:2b)")
     parser.add_argument("-f", "--output-format", choices=["markdown", "yaml"], default="markdown", help="Summary output format (Default: markdown)")
     parser.add_argument("-j", "--job-type", choices=["summary", "research"], default="summary", help="Define job type to select prompt workflow (default: summary)")
-    parser.add_argument("-s", "--chunk-style", choices=["word", "sentence"], default="word", help="Chunking method: 'word' or 'sentence' (default: word)")
+    parser.add_argument("-s", "--chunk-style", choices=["word", "sentence", "density"], default="word", help="Chunk boundry method: 'word', 'sentence', or 'density' (default: word)")
     parser.add_argument("-w", "--max-words", type=int, help="Word count threshold for chunking transcript. Converted to --max-tokens (default: 3500)")
     parser.add_argument("-t", "--max-tokens", type=int, help="Approximate max tokens per chunk. Overrides --max-words (Default: 2500)")
     parser.add_argument("-p", "--max-pass", type=int, default=3, help="Max iterations for multi-pass summarization (default: 3)")
@@ -789,6 +880,7 @@ def main():
         PROMPT_LOOKUP = _prompts.get("prompt_router", {})
         CLASSIFIER_PROMPT = _prompts.get("classifier_prompt", {}).get("text", "")
         classifier_types = _prompts.get("classifier_types", {})
+        density_keywords = _prompts.get("density_keywords", {})
     else:
         # fallback: inline general defaults
         logger.warning("No prompts found for job type '%s', using inline general defaults", args.job_type)
@@ -811,6 +903,7 @@ def main():
         }
         CLASSIFIER_PROMPT = ""
         classifier_types = {}
+        density_keywords = {}
 
     if args.disable_auto_classification:
         validate_prompt(args.first_prompt, "first-prompt", PROMPTS)
@@ -938,6 +1031,7 @@ def main():
 
             # Loop to dynamically summarize text, possibly recursively summarizing summaries
             pass_num = 1  # Current pass counter
+            summary = ""
             while pass_num <= max_pass:
                 # Select prompt type: first pass uses 'prompt_type_first', subsequent use 'prompt_type_second'
                 prompt_type = first_pass_id if pass_num == 1 else multi_pass_id
@@ -947,11 +1041,23 @@ def main():
                     return 1
 
                 # Prepare transcript for summarization by chunking contents if necessary
-                # If text too large to summarize in one call, break into chunks and summarize each chunk
-                if args.chunk_style == "sentence":
+                # If text is too large to summarize in one call, break into chunks and summarize each chunk
+                if args.chunk_style == "density":
+                    # Dynamically reduce density threshold since each pass creates more density
+                    # Python lists are 0 indexed, so pass 1 should use index 0.
+                    density_threshold = [25, 75, 500][min(pass_num - 1, 2)]
+                    keywords = set(density_keywords.get("keywords", []))
+                    chunks = prepare_text_chunk_density(
+                        transcript,
+                        max_tokens=max_tokens,
+                        density_keywords=keywords,
+                        density_threshold=density_threshold
+                    )
+                elif args.chunk_style == "sentence":
                     chunks = prepare_text_chunk_sentence(transcript, max_tokens=max_tokens)
-                else:  # default or "word"
-                    chunks = prepare_text_chunk(transcript, max_tokens=max_tokens)
+                else:
+                    # default chunking boundry is by "word"
+                    chunks = prepare_text_chunk_word(transcript, max_tokens=max_tokens)
 
                 chunk_summaries = []
                 count = 0
@@ -984,7 +1090,7 @@ def main():
                     if args.enable_chunk_writer:
                         try:
                             chunk_files = write_chunk_files(chunk_summary, output_dir, meeting_type, base_name, pass_num, count)
-                            logger.info("Wrote chunk to %s", chunk_files)
+                            logger.info("Wrote %d chunk tokens to %s", estimate_token_count(chunk_summary), chunk_files)
                         except Exception as e:
                             logger.error("Error writing chunk files: %s", e)
 
@@ -995,6 +1101,7 @@ def main():
 
                 # Combine chunk summaries into a single string for final summarization
                 transcript = "\n\n".join(chunk_summaries)
+                logger.debug("Joined transcript tokens %d",estimate_token_count(transcript))
 
                 # If summary is small enough or this is the last pass, finalize and exit loop
                 if pass_num >= 2:
@@ -1012,9 +1119,6 @@ def main():
 
                 # Increment pass number and repeat loop
                 pass_num += 1
-
-                # Clean up
-                gc.collect()
             # End while loop
 
             # Calculate total tokens used and estimate API cost
@@ -1034,7 +1138,7 @@ def main():
                     summary_file = write_summary_file(summary, base_name, output_dir, args.output_format)
                     logger.debug("\nFinal Summary:\n")
                     logger.debug(summary)
-                    logger.info("Final summary written to: %s\n", summary_file)
+                    logger.info("Final summary: %d tokens written to: %s\n", estimate_token_count(summary), summary_file)
                 except Exception as e:
                     logger.error("Failed to write summary file: %s", e)
             elif args.job_type == "research":
