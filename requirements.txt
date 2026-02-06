@@ -1,7 +1,7 @@
-toml>=0.10.2
+toml~=0.10.2
 tomlkit~=0.13.3
 PyYAML~=6.0.2
-requests~=2.32.4
+requests~=2.32.5
 webvtt-py~=0.5.1
 torch<=2.7.1
 torchaudio<=2.7.1
@@ -11,3 +11,7 @@ sentence-transformers~=4.1.0
 chromadb>=1.4.0
 streamlit>=1.52.2
 mdformat~=1.0.0
+numpy>=2.3.5,<2.4.0
+scikit-learn~=1.8.0
+openai-whisper==20250625
+faster-whisper==1.2.1
