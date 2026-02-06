@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 YATSEE Entity Configuration Scaffold Generator
 
