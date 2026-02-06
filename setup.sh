@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # yatsee_setup.sh
-# Fully hardened pre-flight setup for YATSEE pipeline
-# Ensures Python, virtualenv, dependencies, GPU/MPS, spaCy, and directories are ready
+# Pre-flight setup for YATSEE pipeline
+# Ensures Python, virtualenv, dependencies, GPU/MPS, spaCy, etc. are ready
 
 set -euo pipefail
 
 echo "🔧 Starting YATSEE pre-flight setup..."
 
 # ----------------------------
-# 1. Check Python version (>=3.10)
+# Check Python version (>=3.10)
 # ----------------------------
 PYTHON_REQUIRED="3.10"
 PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
@@ -19,7 +19,7 @@ fi
 echo "✅ Python $PYTHON_VERSION OK"
 
 # ----------------------------
-# 2. Check venv module
+# Check venv module
 # ----------------------------
 if ! python3 -m venv --help &>/dev/null; then
     echo "❌ Python venv module is not available"
@@ -28,7 +28,20 @@ fi
 echo "✅ venv module available"
 
 # ----------------------------
-# 3. Create and activate virtualenv
+# Check essential CLI tools
+# ----------------------------
+tools=("ffmpeg" "yt-dlp")
+for tool in "${tools[@]}"; do
+    if ! command -v "$tool" &>/dev/null; then
+        echo "❌ $tool is not installed. Please install it via your package manager."
+        echo "   Linux: sudo apt install $tool  |  macOS: brew install $tool"
+    else
+        echo "✅ $tool found: $(command -v "$tool")"
+    fi
+done
+
+# ----------------------------
+# Create and activate virtualenv
 # ----------------------------
 VENV_DIR=".venv"
 if [[ ! -d "$VENV_DIR" ]]; then
@@ -41,83 +54,67 @@ echo "⚡ Virtual environment activated"
 echo "💡 Remember to source $VENV_DIR/bin/activate in future terminals"
 
 # ----------------------------
-# 4. Upgrade pip and install requirements
+# Upgrade pip and install requirements
 # ----------------------------
-pip install --upgrade pip
-if [[ -f "requirements.txt" ]]; then
-    pip install -r requirements.txt
-    echo "✅ Python dependencies installed"
-else
-    echo "⚠️ requirements.txt not found, skipping pip install"
-fi
-
-# ----------------------------
-# 5. Check essential CLI tools
-# ----------------------------
-for tool in ffmpeg yt-dlp; do
-    if ! command -v "$tool" &>/dev/null; then
-        echo "❌ $tool is not installed. Please install it via your package manager."
-        echo "   Linux: sudo apt install $tool  |  macOS: brew install $tool"
+INSTALL_PERFORMED=false
+read -p "Do you want to upgrade pip and install requirements? [y/N]: " choice
+if [[ "$choice" =~ ^[Yy]$ ]]; then
+    pip install --upgrade pip
+    if [[ -f "requirements.txt" ]]; then
+        pip install -r requirements.txt
+        echo "✅ Python dependencies installed"
+        INSTALL_PERFORMED=true
     else
-        echo "✅ $tool found: $(command -v "$tool")"
+        echo "⚠️ requirements.txt not found, skipping"
     fi
-done
-
-# ----------------------------
-# 6. Check GPU / MPS / CPU
-# ----------------------------
-echo "🔍 Detecting compute device..."
-GPU_AVAILABLE=false
-MPS_AVAILABLE=false
-DEVICE="CPU"
-
-# CUDA GPU check
-if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
-    GPU_AVAILABLE=true
-    DEVICE="CUDA GPU"
+else
+    echo "⏭️ Skipping installation. (Note: Some checks may be skipped if requirements aren't setup)"
 fi
 
-# Apple MPS check
-if python3 -c "import torch; print(torch.backends.mps.is_available())" 2>/dev/null | grep -iq 'True'; then
-    MPS_AVAILABLE=true
-    DEVICE="Apple MPS"
-fi
+# ----------------------------
+# Check GPU / MPS (Only if torch is available)
+# ----------------------------
+DEVICE="Unknown (Requirements skipped)"
 
-if [[ "$GPU_AVAILABLE" == false && "$MPS_AVAILABLE" == false ]]; then
-    echo "⚠️ No GPU/MPS detected. CPU fallback will be used (slower performance)."
-    read -p "Do you want to continue anyway? [y/N]: " choice
-    if [[ ! "$choice" =~ ^[Yy]$ ]]; then
-        echo "🚫 Setup aborted due to lack of GPU/MPS"
-        exit 1
+# We check if torch is actually 'importable' before running detection logic
+if python3 -c "import torch" &>/dev/null; then
+    echo "🔍 Detecting compute device..."
+    GPU_AVAILABLE=$(python3 -c "import torch; print(torch.cuda.is_available())")
+    MPS_AVAILABLE=$(python3 -c "import torch; print(torch.backends.mps.is_available())")
+
+    if [[ "$GPU_AVAILABLE" == "True" ]]; then
+        DEVICE="CUDA GPU"
+    elif [[ "$MPS_AVAILABLE" == "True" ]]; then
+        DEVICE="Apple MPS"
+    else
+        DEVICE="CPU"
+        echo "⚠️ No GPU/MPS detected. CPU fallback will be used."
     fi
+    echo "✅ Using device: $DEVICE"
 fi
-echo "✅ Using device: $DEVICE"
 
 # ----------------------------
-# 7. Install spaCy model
+# Install spaCy model (Only if spacy is available)
 # ----------------------------
 SPACY_MODEL="en_core_web_md"
-if ! python3 -m spacy validate | grep -q "$SPACY_MODEL"; then
-    echo "⚡ Installing spaCy model $SPACY_MODEL..."
-    python3 -m spacy download "$SPACY_MODEL" --force
+if python3 -c "import spacy" &>/dev/null; then
+    if ! python3 -m spacy validate | grep -q "$SPACY_MODEL"; then
+        echo "⚡ Installing spaCy model $SPACY_MODEL..."
+        python3 -m spacy download "$SPACY_MODEL" --force
+    fi
+    echo "✅ spaCy model $SPACY_MODEL ready"
+else
+    echo "⏭️ spaCy not installed; skipping model check."
 fi
-echo "✅ spaCy model $SPACY_MODEL ready"
 
 # ----------------------------
-# 8. Create default directories
+# Create default directories
 # ----------------------------
-echo "🔧 Creating default pipeline directories..."
-BASE_DIRS=("downloads" "audio" "transcripts_medium" "normalized" "summary" "data")
-for d in "${BASE_DIRS[@]}"; do
-    mkdir -p "$d"
-done
-echo "✅ Base directories created: ${BASE_DIRS[*]}"
-
 # Suggest entity-specific directory scaffolding
 echo "💡 Entity directories will be created by yatsee_config_builder.py after adding entities in yatsee.toml"
 
 # ----------------------------
-# 9. Final summary
+# Final summary
 # ----------------------------
 echo "🖥️  System summary:"
 echo "   Python version: $PYTHON_VERSION"
