@@ -2,15 +2,15 @@
 
 **YATSEE** -- Yet Another Tool for Speech Extraction & Enrichment
 
-YATSEE is a local-first, end-to-end data pipeline designed to systematically refine raw meeting audio into a clean, searchable, and auditable intelligence layer. It automates the tedious work of downloading, transcribing, and normalizing unstructured conversations.
+YATSEE is a local-first, end-to-end data pipeline designed to systematically refine raw meeting audio into clean, searchable, and auditable intelligence. It automates the tedious work of downloading, transcribing, and normalizing unstructured conversations.
 
 This is a local-first, privacy-respecting toolkit for anyone who wants to turn public noise into actionable intelligence.
 
 ## Why This Exists
 
-Public records are often public in name only. Civic business is frequently buried in four-hour livestreams and jargon-filled transcripts that are technically accessible but functionally opaque. The barrier to entry for an interested citizen is hours of time and complex jargon.
+Public records are often public in name only. Civic business is frequently buried in four-hour livestreams and jargon-filled transcripts that are technically accessible but functionally opaque. The barrier to entry for an interested citizen is hours of time and dealing with complex jargon.
 
-YATSEE solves that by using a carefully tuned local LLM to transform that wall of text into a high-signal summary—extracting the specific votes, contracts, and policy debates that matter. It's a tool for creating the clarity and accountability that modern civic discourse requires, with or without the government's help.
+YATSEE solves that by using a carefully tuned local LLM to transform that wall of text into a high-signal summary. YATSEE can be set to extract specific votes, contracts, and policy debates that allow you to find what you are interested in fast. It's a tool for creating clarity and accountability that modern civic discourse requires.
 
 ## Demo
 
@@ -118,7 +118,7 @@ streamlit run yatsee_search_demo.py -- -e entity_name_configured
 
 ---
 
-## ⚙️ Requirements & Setup
+## Requirements
 
 This pipeline was developed and tested on the following setup:
   - **CPU:** Intel Core i7-10750H (6 cores / 12 threads, up to 5.0 GHz)
@@ -174,24 +174,26 @@ If you cannot use the setup script, ensure you have `ffmpeg` and `yt-dlp` instal
 
   - ollama  Run local LLMs for summarization
 
-### Install CLI tools for your platform
+---
+
+# Setup
+
+### Install ffmpeg for your platform
 
 macOS (Homebrew):
 ```bash
-brew install yt-dlp ffmpeg
+brew install ffmpeg
 ```
 
 Fedora:
 ```bash
-sudo dnf install yt-dlp ffmpeg
+sudo dnf install ffmpeg
 ```
 
 Debian/Ubuntu:
 ```bash
 sudo apt-get update
 sudo apt-get install ffmpeg
-sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp
-sudo chmod a+rx /usr/local/bin/yt-dlp
 ```
 
 ### Install Python Packages
@@ -200,19 +202,11 @@ You can use pip to install the core requirements:
 
 Install:
 ```bash
-pip install torch torchaudio tqdm
-pip install --upgrade git+https://github.com/openai/whisper.git
-
-pip install toml pyyaml spacy
+pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 ```
 
-### Install faster-whisper (Optional for faster transcription)
-
-Install:
-```bash
-pip install faster-whisper  # optional, for better performance
-```
+### Whisper/faster-whisper
 
 On first run, it will download a model (e.g., base, medium). Ensure you have enough RAM.
 
@@ -222,11 +216,7 @@ Used for generating markdown or YAML summaries from transcripts.
 
 install:
 ```bash
-pip install requests
-
 curl -fsSL https://ollama.com/install.sh | sh
 ```
 
 See https://ollama.com for supported models and system requirements.
-
----
