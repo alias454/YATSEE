@@ -14,9 +14,6 @@ downloads/
 *.webm
 *.mp4
 
-# Allow demo
-!yatsee_demo.mp4
-
 # Audio
 audio/
 *.wav
@@ -57,6 +54,9 @@ yatsee_db/
 __pycache__/
 *.py[cod]
 *$py.class
+
+# docs
+!docs/*
 
 # Thanks mac
 .DS_Store

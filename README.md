@@ -19,18 +19,18 @@ YATSEE solves that by using a carefully tuned local LLM to transform that wall o
 ---
 
 ## Documentation
+ - [YATSEE Pipeline Overview](./docs/yatsee_overview.md)
+ - [YATSEE Configuration Guide](./docs/yatsee_config_guide.md)
+ - [YATSEE User Guide](./docs/yatsee_user_guide.md)
+ - [YATSEE Prompt Orchestration](./docs/yatsee_prompt_orchestration.md)
 
 All modules are fully documented using standard Python docstrings.
 
-To browse documentation locally:
+To browse module documentation use `pydoc` locally:
 
 ```bash
 pydoc ./yatsee_summarize_transcripts.py
 ```
-
-[Pipeline Overview](./docs/yatsee_overview.md)
-
-[User Guide](./docs/yatsee_user_guide.md)
 
 ---
 
