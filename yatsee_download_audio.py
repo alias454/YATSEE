@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+# Copyright (C) 2026 Alias454
+# Licensed under the AGPLv3. See LICENSE file for details.
 """
 yatsee_download_audio.py
 
@@ -283,17 +286,16 @@ def get_video_upload_date(video_id: str, js_runtime: str = "deno") -> Optional[s
     try:
         with YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=False)
-    except (DownloadError, ExtractorError):
-        return None
-    except OSError:
+
+            upload_date = info.get("upload_date")
+            if isinstance(upload_date, str):
+                return upload_date
+    except (DownloadError, ExtractorError) as e:
+        # CIRCUIT BREAKER: Raise as RuntimeError so Main can see the "429"
+        raise RuntimeError(f"CRITICAL: {video_id}: {e}")
+    except OSError as e:
         # subprocess / runtime / filesystem weirdness
-        return None
-
-    upload_date = info.get("upload_date")
-    if isinstance(upload_date, str):
-        return upload_date
-
-    return None
+        raise RuntimeError(f"SYSTEM_ERROR: {e}")
 
 
 def get_tracked_ids(tracker_file: str, dry_run: bool = False) -> set[str]:
@@ -411,8 +413,12 @@ def download_audio(video_id: str, output_dir: str, js_runtime: str = "deno", dry
     try:
         with YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
-    except Exception as exc:
-        raise RuntimeError(f"yt-dlp download failed for {video_id}: {exc}") from exc
+    except (DownloadError, ExtractorError) as e:
+        # CIRCUIT BREAKER: Raise as RuntimeError so Main can see the "429"
+        raise RuntimeError(f"CRITICAL: {video_id}: {e}")
+    except Exception as e:
+        # subprocess / runtime / filesystem weirdness
+        raise RuntimeError(f"SYSTEM_ERROR: {video_id}: {e}")
 
     return {
         "status": "downloaded",
@@ -557,21 +563,35 @@ def main() -> int:
             logger.debug("Skipping %s (already processed)", video_id)
             continue
 
-        upload_date = get_video_upload_date(video_id, js_runtime=js_runtime)
-        if not upload_date:
-            logger.warning("Skipping %s (no upload date)", video_id)
+        try:
+            upload_date = get_video_upload_date(video_id, js_runtime=js_runtime)
+            if not upload_date:
+                logger.warning("Skipping %s (no upload date)", video_id)
+                continue
+
+            if date_before and upload_date > date_before:
+                logger.warning("Skipping %s (upload date in the future: %s)",video_id, upload_date)
+                continue
+
+            if date_after and upload_date < date_after:
+                logger.info("Reached cutoff date with %s (%s); stopping",video_id, upload_date)
+                break
+
+            # We made it here so we can download the audio
+            result = download_audio(video_id, output_dir, js_runtime=js_runtime, dry_run=args.dry_run)
+        except RuntimeError as e:
+            # IP REPUTATION THREAT (429)
+            if "429" in str(e):
+                logger.critical("HTTP 429 DETECTED. YouTube is onto us. Shutting down for 12 hours.")
+                return 1
+            # SYSTEM THREAT (Disk Full, Binary Missing)
+            if "SYSTEM_ERROR" in str(e):
+                logger.critical("Systemic error detected. Crashing for repair: %s", e)
+                return 1
+
+            logger.error("Download failed but continuing: %s", e)
             continue
 
-        if date_before and upload_date > date_before:
-            logger.warning("Skipping %s (upload date in the future: %s)",video_id, upload_date)
-            continue
-
-        if date_after and upload_date < date_after:
-            logger.info("Reached cutoff date with %s (%s); stopping",video_id, upload_date)
-            break
-
-        # We made it here so we can download the audio
-        result = download_audio(video_id, output_dir, js_runtime=js_runtime, dry_run=args.dry_run)
         if result.get("status") == "downloaded":
             cleaned_file = clean_downloaded_file(video_id, output_dir)
             if cleaned_file:

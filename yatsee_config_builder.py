@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+# Copyright (C) 2026 Alias454
+# Licensed under the AGPLv3. See LICENSE file for details.
 """
 YATSEE Entity Configuration Scaffold Generator
 

@@ -1,5 +1,7 @@
 # YATSEE Audio Transcription Pipeline
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
 **YATSEE** -- Yet Another Tool for Speech Extraction & Enrichment
 
 YATSEE is a local-first, end-to-end data pipeline designed to systematically refine raw meeting audio into clean, searchable, and auditable intelligence. It automates the tedious work of downloading, transcribing, and normalizing unstructured conversations.
@@ -176,7 +178,7 @@ If you cannot use the setup script, ensure you have `ffmpeg` and `yt-dlp` instal
 
 ---
 
-# Setup
+## Setup
 
 ### Install ffmpeg for your platform
 
@@ -220,3 +222,14 @@ curl -fsSL https://ollama.com/install.sh | sh
 ```
 
 See https://ollama.com for supported models and system requirements.
+
+## License
+
+YATSEE is open-source software licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**.
+
+### What this means:
+- **Freedom:** You are free to use, modify, and distribute this software.
+- **Open Source:** If you modify YATSEE and distribute it (or run it as a service over a network), you **must** open-source your modifications under the same AGPLv3 license.
+
+**Commercial Licensing:**
+If you wish to use YATSEE in a proprietary product or closed-source commercial environment, please contact admin <at> alias454 <dot> com for a commercial license.
