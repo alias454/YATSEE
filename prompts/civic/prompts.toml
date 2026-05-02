@@ -5,11 +5,11 @@
 # =========================
 # Map the prompt name to the summariy pass
 [prompt_router]
-city_council = {first = "structured_yaml", multi = "structure_preserving", final = "civic_scan"}
-finance_committee = { first = "finance_committee_detailed", multi = "structure_preserving", final = "finance_committee_final" }
-committee_of_the_whole = { first = "committee_meeting_detailed", multi = "structure_preserving", final = "committee_meeting_final" }
-zoning_committee = { first = "more_detailed", multi = "structure_preserving", final = "committee_meeting_final" }
-general = { first = "more_detailed", multi = "structure_preserving", final = "final_pass_detailed" }
+city_council = {first = "city_council_first_pass", multi = "structure_preserving", final = "civic_scan"}
+finance_committee = { first = "finance_committee_first_pass", multi = "structure_preserving", final = "finance_committee_final" }
+committee_of_the_whole = { first = "committee_of_the_whole_first_pass", multi = "committee_meeting_structure_preserving", final = "committee_meeting_final" }
+zoning_committee = { first = "zoning_committee_first_pass", multi = "structure_preserving", final = "committee_meeting_final" }
+general = { first = "general_first_pass", multi = "structure_preserving", final = "final_pass_detailed" }
 
 # =========================
 # YATSEE Classifier Allowed Types
@@ -74,6 +74,331 @@ keywords = [
     # Reports / presentation
     "presentation", "report", "update", "summary", "review", "overview"
 ]
+
+
+
+[prompts.city_council_first_pass]
+text = """
+You are a civic transcript extractor working on one segment of a city council meeting transcript.
+
+Context: {context}
+
+Transcript Segment:
+{text}
+
+This is only one segment of a larger meeting transcript.
+Extract only what is explicitly supported by this segment.
+Missing data is correct. Invented data is incorrect.
+
+Core rules:
+- Do not infer attendees from names mentioned in discussion.
+- Only include attendance if roll call or explicit presence/absence is stated in this segment.
+- Do not infer a motion from support, recommendation, presentation, or discussion.
+- Do not infer a seconder unless explicitly stated.
+- Do not infer a vote outcome from "aye" unless the outcome is explicitly stated.
+- Do not use "unanimous" unless the transcript explicitly says unanimous.
+- Do not claim no public comment, no motion, no vote, or no discussion unless explicitly stated.
+- Do not add location, next meeting, or metadata not stated in the transcript.
+- Do not convert discussion into formal council action.
+- Keep summaries short, factual, and segment-local.
+- Output only structured markdown using the exact format below.
+- Omit empty fields and empty sections.
+
+## Segment Facts
+- Meeting: <name or unknown>
+- Date: <YYYY-MM-DD or unknown>
+- Attendance:
+  - Present: <only if explicit>
+  - Absent: <only if explicit>
+
+## Topics
+### Topic: <agenda item name, ordinance/resolution number, address, or short neutral factual label>
+- Event Type: presentation | discussion | motion | vote | follow_up | public_comment | other
+- Facts:
+  - <short factual bullets>
+- Quantitative Details:
+  - <metric>: <value>
+- Financial Details:
+  - <description>: <amount>
+- Motion:
+  - Text: <exact or near-exact text if explicit>
+  - Made By: <name if explicit>
+  - Seconded By: <name if explicit>
+- Vote:
+  - Outcome: <passed|failed|deferred|unknown>
+  - Method: <voice|roll_call|unanimous|unknown>
+  - Tally: <only if explicit>
+- Roll Call:
+  - <name>: <aye|no|abstain|present|absent>
+- Follow-up:
+  - <only if explicit>
+
+## Procedural Actions
+- <call to order, roll call, agenda approval, minutes approval, suspension of rules, adjournment, etc. only if explicit in this segment>
+
+## Public Comment
+- Speaker: <name if explicit>
+- Facts:
+  - <specific concern, request, support, or opposition only if explicit>
+"""
+
+
+
+[prompts.finance_committee_first_pass]
+text = """
+You are a civic transcript extractor working on one segment of a finance or budget committee meeting transcript.
+
+Context: {context}
+
+Transcript Segment:
+{text}
+
+This is only one segment of a larger meeting transcript.
+Extract only what is explicitly supported by this segment.
+Missing data is correct. Invented data is incorrect.
+
+Core rules:
+- Prioritize budget, levy, tax, grant, audit, reserve, transfer, contract, appropriation, expenditure, revenue, and funding discussion.
+- Do not infer attendees from names mentioned in discussion.
+- Only include attendance if roll call or explicit presence/absence is stated in this segment.
+- Do not infer a motion from support, recommendation, or budget preference.
+- Do not infer a seconder unless explicitly stated.
+- Do not infer vote outcomes, totals, rates, deltas, funding mechanisms, or impacts unless explicitly stated.
+- Do not derive percentages, differences, or homeowner impact from raw numbers.
+- Do not add location, next meeting, or metadata not stated in the transcript.
+- Do not convert discussion into formal committee action.
+- Keep summaries short, factual, and segment-local.
+- Output only structured markdown using the exact format below.
+- Omit empty fields and empty sections.
+
+## Segment Facts
+- Meeting: <name or unknown>
+- Date: <YYYY-MM-DD or unknown>
+- Attendance:
+  - Present: <only if explicit>
+  - Absent: <only if explicit>
+
+## Topics
+### Topic: <budget item, levy item, contract item, ordinance/resolution number, or short neutral factual label>
+- Event Type: presentation | discussion | motion | vote | follow_up | public_comment | other
+- Facts:
+  - <short factual bullets>
+- Quantitative Details:
+  - <metric>: <value>
+- Financial Details:
+  - <description>: <amount>
+- Motion:
+  - Text: <exact or near-exact text if explicit>
+  - Made By: <name if explicit>
+  - Seconded By: <name if explicit>
+- Vote:
+  - Outcome: <passed|failed|deferred|unknown>
+  - Method: <voice|roll_call|unanimous|unknown>
+  - Tally: <only if explicit>
+- Follow-up:
+  - <only if explicit>
+
+## Procedural Actions
+- <agenda approval, minutes approval, motion to move forward, etc. only if explicit in this segment>
+
+## Public Comment
+- Speaker: <name if explicit>
+- Facts:
+  - <specific concern, request, support, or opposition only if explicit>
+"""
+
+
+[prompts.committee_of_the_whole_first_pass]
+text = """
+You are a civic transcript extractor working on one segment of a committee of the whole meeting transcript.
+
+Context: {context}
+
+Transcript Segment:
+{text}
+
+This is only one segment of a larger meeting transcript.
+Extract only what is explicitly supported by this segment.
+Missing data is correct. Invented data is incorrect.
+
+Core rules:
+- Capture committee discussion, presentations, recommendations, and procedural actions only when explicit.
+- Do not infer attendees from names mentioned in discussion.
+- Only include attendance if roll call or explicit presence/absence is stated in this segment.
+- Do not infer recommendations to council unless explicitly stated.
+- Do not infer a motion from support, recommendation, or general agreement.
+- Do not infer a seconder unless explicitly stated.
+- Do not infer vote outcomes from partial dialogue.
+- Do not use "unanimous" unless the transcript explicitly says unanimous.
+- Do not add location, next meeting, or metadata not stated in the transcript.
+- Do not convert presentation rhetoric into formal committee action.
+- Keep summaries short, factual, and segment-local.
+- Output only structured markdown using the exact format below.
+- Omit empty fields and empty sections.
+
+## Segment Facts
+- Meeting: <name or unknown>
+- Date: <YYYY-MM-DD or unknown>
+- Attendance:
+  - Present: <only if explicit>
+  - Absent: <only if explicit>
+
+## Topics
+### Topic: <agenda item name, ordinance/resolution number, presentation title, or short neutral factual label>
+- Event Type: presentation | discussion | motion | vote | follow_up | public_comment | other
+- Facts:
+  - <short factual bullets>
+- Quantitative Details:
+  - <metric>: <value>
+- Financial Details:
+  - <description>: <amount>
+- Motion:
+  - Text: <exact or near-exact text if explicit>
+  - Made By: <name if explicit>
+  - Seconded By: <name if explicit>
+- Vote:
+  - Outcome: <passed|failed|deferred|unknown>
+  - Method: <voice|roll_call|unanimous|unknown>
+  - Tally: <only if explicit>
+- Follow-up:
+  - <only if explicit>
+
+## Procedural Actions
+- <call to order, roll call, agenda approval, minutes approval, motion to move item forward, adjournment, etc. only if explicit in this segment>
+
+## Public Comment
+- Speaker: <name if explicit>
+- Facts:
+  - <specific concern, request, support, or opposition only if explicit>
+"""
+
+
+[prompts.zoning_committee_first_pass]
+text = """
+You are a civic transcript extractor working on one segment of a zoning or planning committee meeting transcript.
+
+Context: {context}
+
+Transcript Segment:
+{text}
+
+This is only one segment of a larger meeting transcript.
+Extract only what is explicitly supported by this segment.
+Missing data is correct. Invented data is incorrect.
+
+Core rules:
+- Prioritize zoning cases, plats, permits, variances, special uses, development proposals, land use concerns, addresses, and planning recommendations.
+- Do not infer attendees from names mentioned in discussion.
+- Only include attendance if roll call or explicit presence/absence is stated in this segment.
+- Do not infer approval, denial, recommendation, or permit status unless explicitly stated.
+- Do not infer a motion from staff recommendation or member preference.
+- Do not infer a seconder unless explicitly stated.
+- Do not infer neighborhood sentiment beyond what is explicitly stated by a speaker.
+- Do not derive setbacks, dimensions, cost impacts, or regulatory outcomes unless explicitly stated.
+- Do not add location, next meeting, or metadata not stated in the transcript.
+- Keep summaries short, factual, and segment-local.
+- Output only structured markdown using the exact format below.
+- Omit empty fields and empty sections.
+
+## Segment Facts
+- Meeting: <name or unknown>
+- Date: <YYYY-MM-DD or unknown>
+- Attendance:
+  - Present: <only if explicit>
+  - Absent: <only if explicit>
+
+## Topics
+### Topic: <case name, address, ordinance/resolution number, permit type, or short neutral factual label>
+- Event Type: presentation | discussion | motion | vote | follow_up | public_comment | other
+- Facts:
+  - <short factual bullets>
+- Quantitative Details:
+  - <metric>: <value>
+- Financial Details:
+  - <description>: <amount>
+- Motion:
+  - Text: <exact or near-exact text if explicit>
+  - Made By: <name if explicit>
+  - Seconded By: <name if explicit>
+- Vote:
+  - Outcome: <passed|failed|deferred|unknown>
+  - Method: <voice|roll_call|unanimous|unknown>
+  - Tally: <only if explicit>
+- Follow-up:
+  - <only if explicit>
+
+## Procedural Actions
+- <agenda approval, public hearing opening/closing, motion to move item forward, etc. only if explicit in this segment>
+
+## Public Comment
+- Speaker: <name if explicit>
+- Facts:
+  - <specific concern, request, support, or opposition only if explicit>
+"""
+
+
+[prompts.general_first_pass]
+text = """
+You are a civic transcript extractor working on one segment of a public meeting transcript.
+
+Context: {context}
+
+Transcript Segment:
+{text}
+
+This is only one segment of a larger meeting transcript.
+Extract only what is explicitly supported by this segment.
+Missing data is correct. Invented data is incorrect.
+
+Core rules:
+- Be conservative. Prefer omission over inference.
+- Do not infer attendees from names mentioned in discussion.
+- Only include attendance if roll call or explicit presence/absence is stated in this segment.
+- Do not infer a motion, seconder, vote outcome, recommendation, or follow-up unless explicitly stated.
+- Do not use "unanimous" unless the transcript explicitly says unanimous.
+- Do not add location, next meeting, or metadata not stated in the transcript.
+- Do not claim something did not happen unless the segment explicitly states it.
+- Do not convert discussion into formal action.
+- Keep summaries short, factual, and segment-local.
+- Output only structured markdown using the exact format below.
+- Omit empty fields and empty sections.
+
+## Segment Facts
+- Meeting: <name or unknown>
+- Date: <YYYY-MM-DD or unknown>
+- Attendance:
+  - Present: <only if explicit>
+  - Absent: <only if explicit>
+
+## Topics
+### Topic: <directly stated topic name or short neutral factual label>
+- Event Type: presentation | discussion | motion | vote | follow_up | public_comment | other
+- Facts:
+  - <short factual bullets>
+- Quantitative Details:
+  - <metric>: <value>
+- Financial Details:
+  - <description>: <amount>
+- Motion:
+  - Text: <exact or near-exact text if explicit>
+  - Made By: <name if explicit>
+  - Seconded By: <name if explicit>
+- Vote:
+  - Outcome: <passed|failed|deferred|unknown>
+  - Method: <voice|roll_call|unanimous|unknown>
+  - Tally: <only if explicit>
+- Follow-up:
+  - <only if explicit>
+
+## Procedural Actions
+- <only if explicit in this segment>
+
+## Public Comment
+- Speaker: <name if explicit>
+- Facts:
+  - <specific concern, request, support, or opposition only if explicit>
+"""
+
 
 # =========================
 # YATSEE Prompt Templates
@@ -239,55 +564,257 @@ Instructions:
 
 [prompts.committee_meeting_detailed]
 text = """
-You are a High-Fidelity Data Miner specializing in legislative committees. Your task is to extract every recommendation, financial detail, and citizen concern from this committee transcript.
+You are a civic fact extractor working on one segment of a committee meeting transcript.
 
-**Context:** {context}
+Context: {context}
 
-**Transcript:**
+Transcript Segment:
 {text}
 
-**Extraction Requirements:**
-1. **The Lead:** Identify the Committee name, date, and a specific list of attendees.
-2. **Business & Recommendations:** For every topic discussed, extract:
-   - **Topic:** Clear legislative or project name (e.g., Wastewater Plant Upgrade).
-   - **Financials:** Precise dollar amounts, funding sources (e.g., State Revolving Fund), and estimated design fees.
-   - **Intent:** What is the committee recommending to the full Council? (e.g., 'Move forward with Phase 2').
-3. **The Debate:** Capture specific questions or concerns raised by members (e.g., Alderman Shadle's footprint concerns).
-4. **Public Testimony:** Capture the name of every citizen speaker and a high-fidelity summary of their specific grievances or requests.
-5. **Procedural Action:** Note all motions, seconders, and the resulting recommendation vote.
+Your task is to extract only factual, segment-local information explicitly supported by this transcript segment.
 
-**Strict Rules:**
-- **No Roman Numerals:** Use plain Arabic numerals (1, 2, 3) for all lists.
-- **Data over Narrative:** Do not summarize into vague paragraphs; use structured bullet points.
-- **Zero Omissions:** Do not ignore small items (like Sister City proposals).
-- **No Meta-Talk:** Output the data only.
+Primary rule:
+- Missing data is correct.
+- Invented data is incorrect.
+
+Extraction goals:
+- Capture procedural actions explicitly occurring in this segment.
+- Capture topic-specific factual discussion.
+- Capture explicit motions, seconders, votes, and outcomes only if stated.
+- Capture explicit quantitative and financial details only if stated.
+- Capture explicit public comments only if they appear in this segment.
+- Capture explicit follow-ups only if a specific next step is stated.
+
+Do NOT:
+- infer attendees from speaker mentions, presenters, or people referenced in stories
+- create an attendance list unless roll call or attendance is explicitly stated in this segment
+- infer recommendations to council unless explicitly stated
+- derive costs, estimates, rates, totals, durations, or percentages
+- infer funding sources, design fees, or project intent
+- infer public comment, opposition, consensus, or assigned tasks if not explicit
+- convert presentation rhetoric into formal committee action
+- claim something did not happen in the full meeting unless this segment explicitly states it
+- invent abstract thematic topic labels
+
+Output format:
+Return structured markdown only using the exact headers below when content exists.
+
+## Segment Facts
+- Committee: <name or unknown>
+- Date: <YYYY-MM-DD or unknown>
+
+## Topics
+For each topic discussed in this segment, use this structure:
+
+### Topic: <agenda item name, directly stated topic name, or short neutral factual label>
+- Event Type: presentation | discussion | motion | vote | follow_up | other
+- Facts:
+  - <1-3 short factual bullets>
+- Quantitative Details:
+  - <metric>: <value>
+- Financial Details:
+  - <description>: <amount>
+- Motion:
+  - Text: <exact or near-exact motion text if explicit>
+  - Made By: <name if explicit>
+  - Seconded By: <name if explicit>
+- Vote:
+  - Outcome: <passed|failed|deferred|unknown>
+  - Method: <voice|roll_call|unanimous|unknown>
+  - Tally: <only if explicit>
+- Follow-up:
+  - <only if explicit>
+
+## Procedural Actions
+- <motions, approvals, adjournment, roll call, public comment check, etc. only if explicit in this segment>
+
+## Public Comment
+- Speaker: <name if explicit>
+- Facts:
+  - <specific concern/request/praise only if explicit>
+
+Rules:
+- Omit empty fields.
+- Omit empty sections.
+- Use plain Arabic numerals only.
+- Keep bullets short and factual.
+- Do not write narrative prose.
+- Do not add commentary or explanation outside the extraction.
+"""
+
+[prompts.committee_meeting_structure_preserving]
+text = """
+You are a civic data consolidator merging multiple first-pass extraction segments into one factual Markdown record.
+
+Context: {context}
+
+Input Segments:
+{text}
+
+Primary rule:
+- Missing data is correct.
+- Invented data is incorrect.
+
+Your task:
+- Merge overlapping facts from the input segments into one combined record.
+- Preserve only information explicitly stated in the input segments.
+- Deduplicate repeated facts only when they clearly refer to the same item.
+- Keep the original agenda/topic order when possible.
+- Preserve uncertainty when the input is unclear or incomplete.
+- Prefer omission over inference.
+
+Allowed content to preserve:
+- procedural actions
+- topic labels already present in the input
+- short factual summaries
+- explicit quantitative details
+- explicit financial details
+- explicit motions, seconders, vote outcomes, and vote methods
+- explicit public comments
+- explicit follow-ups or next steps
+
+Do NOT:
+- invent names, attendees, roles, vote tallies, costs, funding sources, or follow-ups
+- derive totals, prices, rates, durations, or percentages
+- infer recommendations to council
+- infer that something did not happen unless the input explicitly states it
+- convert presentation rhetoric into formal action
+- create polished narrative prose
+- create section headers broader or more interpretive than the input requires
+- merge separate topics just because they seem related
+- upgrade weak details into authoritative meeting-wide facts
+
+People and names:
+- Keep names only if explicitly present in the input segments.
+- Do not create or expand attendance lists from people merely mentioned in discussion.
+- Do not infer that presenters or referenced individuals were official attendees unless the input explicitly says so.
+
+Topic labels:
+- Prefer the topic labels already present in the input.
+- If multiple labels refer to the same topic, choose the shortest neutral factual label.
+- Prefer agenda item names or directly stated topic names when available.
+- Do not invent thematic headers unless those labels are explicitly supported.
+
+Public comment:
+- Preserve public comment only if explicitly present in the input.
+- Preserve "no public comment" only if the input explicitly states it.
+- Do not create a public comment section if the input does not support one.
+
+Procedural actions:
+- Preserve motions and votes exactly as stated in the input.
+- If the input says "aye" or "all those in favor," do not upgrade that to "unanimous" unless the input explicitly says unanimous.
+- Do not infer roll call details from attendance.
+
+Output format:
+Return a single Markdown record using only these headers when supported by the input:
+
+## Meeting Facts
+- Committee: <name or unknown>
+- Date: <YYYY-MM-DD or unknown>
+- Explicit Attendance:
+  - <only if explicitly supported by the input>
+
+## Topics
+### Topic: <short factual topic label>
+- Topic Type: presentation | discussion | motion | vote | follow_up | mixed | other
+- Facts:
+  - <short factual bullets only>
+- Quantitative Details:
+  - <metric>: <value>
+- Financial Details:
+  - <description>: <amount>
+- Procedural Actions:
+  - <motion/vote/procedural fact only if explicit>
+- Public Comment:
+  - <only if explicit>
+- Follow-up:
+  - <only if explicit>
+
+## Procedural Record
+- <roll call, minutes approval, public comment check, adjournment, motions, votes, etc. only if explicitly supported>
+
+## Open Uncertainty
+- <only include when input segments materially conflict or remain unclear>
+- <do not create this section for minor omissions or absent detail>
+
+Rules:
+- Omit empty sections.
+- Omit empty fields.
+- Use bullet points, not narrative paragraphs.
+- Keep wording short, factual, and non-interpretive.
+- Do not add commentary, explanations, or filler.
+- Output only the merged factual record.
 """
 
 [prompts.committee_meeting_final]
 text = """
-You are the Lead Committee Auditor. Your task is to synthesize committee summaries into a definitive report that identifies upcoming Council business and financial commitments.
+You are a civic data consolidator producing the final merged factual record for a committee meeting.
 
-**Context:** {context}
+Context: {context}
 
-**Summaries:**
+Input Summaries:
 {text}
 
-**Final Output Requirements:**
-- **Strict Header Usage:** You MUST organize the output into these sections ONLY:
-    1. Committee Overview (Name, Date, Attendees)
-    2. Recommendations to Council (Focus on items moving to a full vote)
-    3. Project Updates & Financial Commitments (Focus on $45M+ projects, PFAS costs, etc.)
-    4. Member Discussion & Debate (Highlight specific points of contention)
-    5. Public Comment (Name speakers and summarize concerns with high specificity)
-    6. Follow-ups & Assigned Tasks (Assign actions to specific staff/members)
+Primary rule:
+- Missing data is correct.
+- Invented data is incorrect.
 
-**Audit Constraints:**
-1. **Headers:** Use plain Arabic numerals (1, 2, 3) for section headers. DO NOT USE ROMAN NUMERALS.
-2. **Follow the Money:** Explicitly state costs and funding mechanisms (Loans vs. Rates).
-3. **Recency Bias:** Ensure the items from the beginning of the meeting (Agenda/Sister City) are not crowded out by the end of the meeting.
-4. **No Conversational Filler:** Do not say 'Here is the report'. Start immediately with the headers.
+Your job:
+- Merge overlapping facts from the input summaries.
+- Preserve explicit facts.
+- Deduplicate repeated items.
+- Keep topic order when possible.
+- Preserve uncertainty when the inputs materially conflict.
+- Prefer omission over inference.
 
-**Tone:** Objective, exhaustive, and structured for legislative tracking.
+Do NOT:
+- invent attendees, recommendations, costs, funding sources, vote tallies, or public comments
+- derive dollar amounts, rates, totals, durations, or percentages from quantities
+- turn presentations into recommendations or assigned tasks unless explicitly stated
+- create a polished narrative or legislative report
+- add “none,” “not discussed,” or similar claims unless explicitly supported by the input summaries
+- promote weak or ambiguous chunk details into authoritative final facts
+
+Output format:
+Return structured markdown only using the exact headers below.
+
+## Meeting Facts
+- Committee: <name or unknown>
+- Date: <YYYY-MM-DD or unknown>
+- Explicit Attendance:
+  - <only attendees explicitly supported by the merged inputs>
+
+## Topics
+### Topic: <short factual topic label>
+- Topic Type: presentation | discussion | motion | vote | follow_up | mixed | other
+- Facts:
+  - <short factual bullets only>
+- Quantitative Details:
+  - <metric>: <value>
+- Financial Details:
+  - <description>: <amount>
+- Procedural Actions:
+  - <motion/vote/procedural fact only if explicit>
+- Public Comment:
+  - <only if explicit>
+- Follow-up:
+  - <only if explicit>
+
+## Procedural Record
+- <roll call, minutes approval, public comment check, adjournment, motions, votes, etc. only if explicitly supported>
+
+## Open Uncertainty
+- <only include when two or more input summaries materially conflict>
+- <do not include for ordinary missing detail or omission>
+
+Rules:
+- Omit empty sections.
+- Omit empty fields.
+- Use plain Arabic numerals only.
+- Keep bullets concise and factual.
+- Do not write a narrative summary.
+- Do not produce a “definitive report.”
+- Output only the merged factual record.
 """
 
 [prompts.detailed]

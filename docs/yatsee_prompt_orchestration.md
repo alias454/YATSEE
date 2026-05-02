@@ -1,4 +1,4 @@
-# Prompt Orchestration Overview
+# YATSEE: Prompt Orchestration Overview
 
 This guide explains how YATSEE manages the intelligence layer of the system. Instead of sending a full transcript to a model and hoping for a usable summary, YATSEE uses a structured, multi-stage process to ensure accuracy, consistency, and domain-specific formatting.
 
@@ -11,10 +11,10 @@ YATSEE resolves prompt instructions in a layered order. This allows global defau
 Priority order:
 
 1. **Entity-Specific Prompts**  
-   `data/<entity>/prompts/<job_type>/prompts.toml`
+   `data/<entity>/prompts/<job_profile>/prompts.toml`
 
 2. **Global Job Defaults**  
-   `prompts/<job_type>/prompts.toml`
+   `prompts/<job_profile>/prompts.toml`
 
 3. **System Fallbacks**  
    Hardcoded defaults in the Python pipeline.
@@ -41,9 +41,9 @@ This structure allows each city, committee, or department to have its own custom
 
 **Behavior**:
 
-  - Loader first checks `data/<entity>/prompts/<job_type>/prompts.toml`.  
+  - Loader first checks `data/<entity>/prompts/<job_profile>/prompts.toml`.  
   - If found → full override of defaults.  
-  - If not found → fall back to `prompts/<job_type>/prompts.toml`.
+  - If not found → fall back to `prompts/<job_profile>/prompts.toml`.
 ```
 
 ---
@@ -69,7 +69,6 @@ Global TOML
                     |
                     +--> Pipeline stage (downloads, audio, transcripts)
 ```
-
 
 ---
 
@@ -115,13 +114,13 @@ The model always sees the full action surrounding a meeting decision, improving 
 
 ## 5. Job Types & Custom Behavior
 
-The pipeline is driven by the `--job-type` argument. A job type defines:
+The pipeline is driven by the `--job-profile` argument. A job type defines:
 - which prompt hierarchy to use  
 - which extraction rules apply  
 - what formatting is expected in the final output  
 
 ### Examples
-- **summary**: Default meeting summarization workflow.  
+- **civic**: Default civic meeting summarization workflow.  
 - **research**: A custom job type with prompts optimized for legal, policy, or historical investigations.  
 - **custom audits**: Any custom job type created simply by adding a folder with a new `prompts.toml`.
 

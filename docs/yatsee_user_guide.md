@@ -1,390 +1,340 @@
-# **YATSEE** -- Yet Another Tool for Speech Extraction & Enrichment
+# YATSEE: User Guide
 
-YATSEE is a local-first, end-to-end data pipeline designed to systematically refine raw meeting audio into a clean, searchable, and auditable intelligence layer. It automates the tedious work of downloading, transcribing, and normalizing unstructured conversations.
+YATSEE is a local-first audio extraction and processing pipeline designed to systematically refine raw meeting audio into clean, searchable, and auditable artifacts. It automates the work of acquiring source media, preparing audio, transcribing speech, normalizing text, and generating higher-level intelligence from long-form public recordings.
 
 # Table of Contents
 
 - [Stage 1 – Audio Intake & Download](#stage-1--audio-intake--download)
-- [Stage 2 – Audio Normalization & Chunking](#stage-2--audio-normalization--chunking)
-- [Stage 3 – Transcription & Text Normalization](#stage-3--transcription--text-normalization)
+- [Stage 2 – Audio Formatting & Chunking](#stage-2--audio-formatting--chunking)
+- [Stage 3 – Transcription](#stage-3--transcription)
 - [Stage 4a – Slicing Transcripts into Segments](#stage-4a--slicing-transcripts-into-segments)
 - [Stage 4b – Transcript Normalization & Structure](#stage-4b--transcript-normalization--structure)
-- [Stage 5 – Summarization & Multi-Pass Processing](#stage-5--summarization--multi-pass-processing)
-- [Optional Utilities – YATSEE Sound Recorder](#optional-utilities-yatsee-sound-recorder)
+- [Stage 5 – Intelligence, Summarization & Provider-Based LLM Processing](#stage-5--intelligence-summarization--provider-based-llm-processing)
 
 ---
 
 ## Stage 1 – Audio Intake & Download
 
 ### Purpose:
-Fetch audio from YouTube sources defined in YATSEE entity configurations, producing raw audio files ready for transcription. This is the first step in the pipeline—the “funnel entry”—where your content comes in, no matter the source.
+Fetch source media for a configured entity and place it into the pipeline as raw downloadable input. This is the funnel entry for audio-first processing and is typically used for YouTube-backed source acquisition.
 
 ### Input:
-YouTube channels or playlists specified in your entity configuration.
+Configured entity source definitions or an explicitly provided source path, such as a YouTube channel or playlist.
 
 ### Output:
-Downloaded audio files stored in downloads/ under the entity path.
+Downloaded source media stored in `downloads/` under the entity data path, or in a user-specified output directory.
 
 ### How it Works:
-YATSEE reads your global and entity-specific configuration. Missing keys fail loudly, so you know immediately if something’s misconfigured.
-Videos are resolved via yt-dlp. FFmpeg handles the audio extraction and conversion to MP3.
-Optional date filters allow you to only download content after or before a certain date.
+YATSEE loads the global configuration and the selected entity configuration, merges them, and resolves the enabled source settings for the run. For YouTube-based acquisition, media is resolved using `yt-dlp`. Optional date filters allow selective fetching of newer or older recordings. Playlist caching can be generated independently to avoid repeated upstream resolution work.
 
 ### The system is idempotent:
-.downloaded tracker file prevents re-downloading the same content.
-.playlist_ids.json caches playlist resolution to avoid repeated YouTube queries.
+- `.downloaded` tracking prevents re-fetching the same source items repeatedly.
+- Playlist cache files can be reused to reduce repeated source discovery work.
+- Repeated fetch runs skip already-known media where possible.
 
 ### Why This Stage Matters:
-Centralizes your audio collection from multiple sources.
-Ensures consistency: everything that moves to Stage 2 is in the same format.
-Avoids duplication and wasted bandwidth with built-in caching and tracking.
+- Centralizes source acquisition into a predictable entry point.
+- Keeps input handling consistent before audio formatting begins.
+- Reduces duplicate downloads and wasted bandwidth.
+- Lets you stop after source acquisition if that is all you need.
 
-### User Options / Argparse Flags:
--e / --entity: Which entity to process (required).  
--c / --config: Path to global configuration (default yatsee.toml).  
--o / --output-dir: Override output location for MP3s.  
---js-runtime: Choose JavaScript runtime for yt-dlp (deno, node, quickjs, etc.).  
---youtube-path: Specific channel or playlist to download.  
---date-after / --date-before: Filter videos by date.  
---dry-run: Resolve URLs without downloading.  
---make-playlist: Generate a playlist cache file and exit.  
+### User Options / CLI Flags:
+- `-e` / `--entity`: Which entity to process.
+- `--source`: Optional specific source adapter, such as `youtube`.
+- `-c` / `--config`: Path to global configuration file. Default: `yatsee.toml`.
+- `-o` / `--output-dir`: Override output directory for fetched media.
+- `--date-after` / `--date-before`: Filter source media by date.
+- `--make-playlist`: Rebuild playlist cache and exit.
 
 ### Usage Examples:
-python yatsee_download_audio.py -e defined_entity    
-python yatsee_download_audio.py -e defined_entity --date-after 20260101 --dry-run  
-python yatsee_download_audio.py --youtube-path @channel/streams --output-dir ./audio  
-python yatsee_download_audio.py -e defined_entity --make-playlist
+```bash
+yatsee source fetch -e example_entity
+yatsee source fetch -e example_entity --date-after 20260101
+yatsee source fetch -e example_entity --source youtube --output-dir ./downloads
+yatsee source fetch -e example_entity --make-playlist
+```
 
 ### Design Notes:
-Modular structure separates config loading, YouTube resolution, and download execution.
-Ensures everything entering Stage 2 (formatting) is named correctly and ready to be converted to FLAC 16Khz audio.
-Allows partial workflows: if you only want to download audio, you can stop here.
+- Source acquisition is separated from later audio formatting and transcription stages.
+- This stage is intended to be repeatable and safe to rerun.
+- The primary workflow is entity-driven, but targeted overrides remain possible when needed.
 
 ---
 
 ## Stage 2 – Audio Formatting & Chunking
 
 ### Purpose:
-Convert raw downloaded audio into a format suitable for AI transcription, optionally splitting long recordings into manageable chunks. This stage ensures your audio is ready for Whisper-style transcription models while keeping your workflow efficient and reproducible.
+Convert raw source media into transcription-ready audio, optionally splitting long recordings into manageable chunks. This stage prepares media for ASR workflows by enforcing a consistent audio format.
 
 ### Input:
-Raw media files from downloads/ (MP3, WAV, FLAC, MP4, M4A, WEBM) under the entity path or a specified directory.
+Source files from `downloads/` or a user-provided file or directory.
 
 ### Output:
-Formatted audio in audio/ under the entity path (.wav or .flac).
-Optional sequential chunks stored in audio/chunks/<base_name>/.
+Normalized audio written to `audio/` under the entity path, typically as `.wav` or `.flac`. Optional chunks written to `audio/chunks/<base_name>/`.
 
 ### How it Works:
-YATSEE reads the global and entity-specific configuration to determine formatting preferences.
-Files are converted using ffmpeg/ffprobe, normalized to mono, 16kHz.
-Optionally, long audio files are split into sequential chunks with configurable overlap to prevent sentence truncation.
-SHA-256 tracking prevents reprocessing files unnecessarily.
-Dry-run mode previews operations without writing files; force mode reprocesses even if files were already converted.
-Original media is preserved; chunks are additional outputs.
+YATSEE discovers input files, resolves formatting preferences from configuration and CLI options, and converts supported media using `ffmpeg` and `ffprobe`. Audio is normalized to mono, 16 kHz output suitable for transcription. Long recordings can be split into sequential chunks with overlap to reduce context loss near chunk boundaries. Tracking prevents unnecessary repeated conversion work unless forced.
 
 ### Why This Stage Matters:
-Standardizes audio across multiple sources for consistent transcription quality.
-Avoids memory overload by chunking long recordings.
-Supports experimentation: different chunk lengths or overlaps can improve transcription fidelity and downstream summarization.
-Idempotent design ensures efficiency in repeated runs.
+- Standardizes audio for more predictable transcription quality.
+- Makes long recordings easier to process on modest hardware.
+- Allows chunk sizing and overlap tuning without changing source media.
+- Preserves source media while producing clean derived artifacts.
 
-### User Options / Argparse Flags:
--e / --entity: Entity handle to process.  
--c / --config: Global YATSEE configuration path (default: yatsee.toml).  
--i / --input-dir: Direct override for source files.  
--o / --output-dir: Directory to save normalized audio.  
---format: Output format (wav or flac).  
---create-chunks: Enable splitting audio into chunks.  
---chunk-duration: Length of each chunk in seconds (default 600).  
---chunk-overlap: Seconds of overlap between chunks (default 2).  
---dry-run: Preview actions without changing files.  
---force: Reprocess files even if already converted.
+### User Options / CLI Flags:
+- `-e` / `--entity`: Entity handle to process.
+- `-c` / `--config`: Global configuration path. Default: `yatsee.toml`.
+- `-i` / `--input-dir`: Input file or directory override.
+- `-o` / `--output-dir`: Directory to save normalized audio.
+- `--format`: Output format, either `wav` or `flac`.
+- `--create-chunks`: Enable chunk generation.
+- `--chunk-duration`: Chunk length in seconds. Default: `600`.
+- `--chunk-overlap`: Overlap in seconds between chunks. Default: `2`.
+- `--dry-run`: Preview actions without writing files.
+- `--force`: Reprocess files even if already converted.
 
 ### Usage Examples:
-python yatsee_format_audio.py -e defined_entity    
-python yatsee_format_audio.py --input-dir ./raw_audio --format wav  
-python yatsee_format_audio.py -e defined_entity --create-chunks --chunk-duration 300  
-python yatsee_format_audio.py --dry-run  
-python yatsee_format_audio.py -i ./raw_audio -o ./formatted_audio --force  
+```bash
+yatsee audio format --entity example_entity
+yatsee audio format --input-dir ./raw_audio --format wav
+yatsee audio format --entity example_entity --create-chunks --chunk-duration 300
+yatsee audio format --entity example_entity --dry-run
+yatsee audio format --input-dir ./raw_audio --output-dir ./formatted_audio --force
+```
 
 ### Design Notes:
-Modular design separates configuration, file discovery, hashing, conversion, and chunking.
-Default values ensure smooth operation even with partial configuration.
-Designed to integrate seamlessly with Stage 3 (Transcription & Cleaning).
+- Formatting, discovery, hashing, and chunking are separate concerns internally.
+- This stage is intended to feed transcription cleanly, not to alter the semantic content of the recording.
+- The output contract is deliberately stable so downstream stages can consume it predictably.
 
 ---
 
 ## Stage 3 – Transcription
 
 ### Purpose:
-Convert your formatted audio into structured text for search, indexing, and summarization. Stage 3 ensures that raw speech becomes usable transcripts while maintaining quality and context, even for long or chunked recordings.
+Convert formatted audio into structured transcripts for search, normalization, summarization, and downstream analysis.
 
 ### Input:
-Audio files from audio/ or a user-specified file or directory.
-
-#### Optional:
-Chunked audio files in audio/chunks/<file_basename>/.
+Audio files from `audio/`, chunk directories under `audio/chunks/`, or a user-specified input file or directory.
 
 ### Output:
-WebVTT (.vtt) transcripts stored in transcripts_<model>/ under the entity path or a specified directory.
-Overlapping or near-overlapping segments are merged for readability.
+WebVTT transcript files stored in `transcripts_<model>/` under the entity data path, or in a user-specified output directory.
 
 ### How it Works:
-YATSEE loads the merged entity configuration (global + local) for settings like hotwords, people aliases, and transcription preferences.
-Audio is processed using Whisper or faster-whisper, with optional GPU (CUDA), Apple MPS, or CPU execution. Automatic fallback ensures smooth operation.
-Chunked audio is transcribed sequentially to handle long recordings efficiently.
-Overlapping segments are merged deterministically, producing clean, high-quality VTT files.
-SHA-256 hashing tracks already-transcribed files, avoiding redundant work.
-Verbose or quiet output modes give you control over logging detail.
+YATSEE loads merged configuration, resolves transcription settings, and processes audio using Whisper or faster-whisper. Execution can target CUDA, CPU, or Apple MPS depending on environment and configuration. Chunked audio can be transcribed sequentially for long recordings. Transcript segments are normalized and near-overlapping segments are merged for readability and consistency. Tracking prevents redundant transcription of unchanged inputs.
 
 ### Why This Stage Matters:
-Transforms raw audio into structured text for downstream tasks like summarization, action-item extraction, or semantic search.
-Handles chunked audio and long recordings without losing context or clarity.
-Supports language selection and hotword emphasis for better accuracy in specialized domains.
-Ensures reproducibility and determinism for entities, which is critical for civic or research applications.
+- Transforms audio into machine-usable text.
+- Supports long recordings without requiring the entire source to fit comfortably in memory.
+- Allows model, language, and device selection per run.
+- Provides the base text artifacts required by slicing, normalization, and summarization.
 
-### User Options / Argparse Flags:
--e / --entity: Entity handle to process.  
--c / --config: Global configuration path (yatsee.toml).  
--i / --audio-input: Single file or folder to transcribe (default ./audio).  
--o / --output-dir: Directory to save transcripts.  
--g / --get-chunks: Transcribe chunked audio files.  
--m / --model: Whisper model size (small, medium, large, turbo, etc.).  
---faster: Use faster-whisper if installed.  
--l / --lang: Language code or auto (default en).  
--d / --device: Execution device (auto, cuda, cpu, mps).  
--v / --verbose: Verbose output.  
--q / --quiet: Suppress verbose output.  
+### User Options / CLI Flags:
+- `-e` / `--entity`: Entity handle to process.
+- `-c` / `--config`: Global configuration path. Default: `yatsee.toml`.
+- `-i` / `--audio-input`: Audio file or directory to transcribe.
+- `-o` / `--output-dir`: Directory to save transcripts.
+- `-g` / `--get-chunks`: Transcribe chunked audio.
+- `-m` / `--model`: Transcription model override.
+- `--faster`: Use faster-whisper if available.
+- `-l` / `--lang`: Language code or `auto`. Default: `en`.
+- `-d` / `--device`: Execution device such as `auto`, `cuda`, `cpu`, or `mps`.
+- `-v` / `--verbose`: Verbose output.
+- `-q` / `--quiet`: Reduced output.
 
 ### Usage Examples:
-python yatsee_transcribe_audio.py -e defined_entity    
-python yatsee_transcribe_audio.py --audio-input ./audio --model small --faster  
-python yatsee_transcribe_audio.py -i ./single_file.mp3 -d cpu --lang es  
-python yatsee_transcribe_audio.py --audio-input ./audio_folder -o ./transcripts/  
+```bash
+yatsee audio transcribe --entity example_entity
+yatsee audio transcribe --audio-input ./audio --model small --faster
+yatsee audio transcribe --audio-input ./single_file.mp3 --device cpu --lang es
+yatsee audio transcribe --audio-input ./audio_folder --output-dir ./transcripts
+```
 
 ### Design Notes:
-Modular design separates configuration loading, file discovery, chunk handling, hotword flattening, segment normalization, and VTT writing.
-Deterministic merging ensures repeated runs produce identical outputs.
-Fully local operation; no cloud services required.
-Integrates seamlessly with Stage 4 (Cleaning & Normalization).
+- Transcription is kept separate from text cleanup and summarization.
+- Segment normalization is deterministic to keep reruns stable.
+- The primary transcript artifact is VTT because it preserves timing while remaining readable.
 
 ---
 
 ## Stage 4a – Slicing Transcripts into Segments
 
 ### Purpose:
-Stage 4a transforms your VTT transcripts into structured, sentence-aware segments for embedding, indexing, or semantic search. This step ensures that each segment is contextually coherent, timestamped, and ready for downstream AI processing.
+Transform VTT transcripts into structured, sentence-aware segments for downstream embedding, indexing, or semantic analysis. This stage also produces plain text transcript output that other stages can consume.
 
 ### Input:
-WebVTT files (.vtt) from Stage 3, typically in transcripts_<model>/.
-Optional custom directories via --vtt-input.
+WebVTT transcript files from `transcripts_<model>/` or a user-specified file or directory.
 
 ### Output:
-Plain text transcripts (.txt) preserving line breaks.
-Optional JSONL segments (.segments.jsonl) containing:
-  start_time, end_time, duration
-  text_raw (sentence content)
-  segment_index, source_id, video_id
+- Plain text transcript files (`.txt`)
+- Optional `.segments.jsonl` files containing structured segment records
+- Optional segment embeddings when enabled
 
 ### How it Works:
-Reads the VTT file and consolidates lines into sentence-aware cues, merging lines that lack terminal punctuation.
-Optionally applies max-window slicing to enforce uniform segment lengths.
-Generates deterministic placeholder video IDs when real IDs are missing, ensuring reproducibility.
-Respects entity-specific configuration overrides, merging them with global yatsee.toml.
-CLI options allow control over verbosity, output location, device selection, and embedding generation.
+YATSEE reads transcript cues and consolidates them into sentence-aware units. Lines lacking terminal punctuation can be merged to avoid fragmented text. Optional max-window constraints can force upper bounds on segment duration. When embedding generation is enabled, segment records include timestamps and embeddings suitable for downstream retrieval workflows.
 
 ### Why This Stage Matters:
-Produces granular, structured segments suitable for semantic indexing, search, or multi-pass summarization.
-Maintains context while preparing data for embedding models.
-Offers flexibility: generate plain text only, JSONL only, or JSONL with embeddings.
-Deterministic outputs allow consistent pipelines across multiple runs or entities.
+- Produces structured transcript fragments that are easier to embed and search.
+- Maintains timestamp alignment for later auditability.
+- Provides plain text output for normalization and summarization.
+- Makes later retrieval-oriented workflows more coherent than raw VTT alone.
 
-### User Options / Argparse Flags:
--e / --entity: Entity handle to process.  
--c / --config: Global configuration path (yatsee.toml).  
--i / --vtt-input: VTT file or folder to slice.  
--o / --output-dir: Directory for segment output.  
--m / --model: SentenceTransformer model name for embedding generation.  
--g / --gen-embed: Generate JSONL segments with embeddings and timestamps.  
---max-window: Hard upper limit (seconds) on segment duration.  
---force: Overwrite existing outputs.  
--d / --device: Execution device (auto, cuda, cpu, mps).  
---verbose: Verbose logging.  
---quiet: Suppress output.  
+### User Options / CLI Flags:
+- `-e` / `--entity`: Entity handle to process.
+- `-c` / `--config`: Global configuration path. Default: `yatsee.toml`.
+- `-i` / `--vtt-input`: VTT file or folder to slice.
+- `-o` / `--output-dir`: Directory for sliced outputs.
+- `-m` / `--model`: Embedding model override when generating embeddings.
+- `-g` / `--gen-embed`: Generate JSONL segments with embeddings.
+- `--max-window`: Hard upper bound on segment length. Default: `90.0`.
+- `--force`: Overwrite existing outputs.
+- `-d` / `--device`: Execution device such as `auto`, `cuda`, `cpu`, or `mps`.
 
 ### Usage Examples:
-python yatsee_slice_vtt.py -e defined_entity --gen-embed  
-python yatsee_slice_vtt.py --vtt-input ./transcripts --max-window 30 --force  
-python yatsee_slice_vtt.py -i ./entity/transcripts_small --output-dir ./segments  
-python yatsee_slice_vtt.py -e defined_entity --quiet
+```bash
+yatsee transcript slice --entity example_entity --gen-embed
+yatsee transcript slice --vtt-input ./transcripts --max-window 30 --force
+yatsee transcript slice --vtt-input ./entity/transcripts_small --output-dir ./segments
+yatsee transcript slice --entity example_entity --device cpu
+```
 
 ### Design Notes:
-Modular functions handle config loading, VTT parsing, sentence consolidation, JSONL generation, and optional embeddings.
-Ensures deterministic segment IDs for consistent indexing.
-Can be run independently on a single transcript or batch-processed for entire entities.
-Fully local; no cloud dependencies are required.
+- This stage bridges timing-preserving transcript artifacts and retrieval-friendly structured text.
+- Deterministic identifiers and structured segment metadata help downstream indexing remain stable.
+- It can be run independently on one transcript or over a full entity batch.
 
 ---
 
 ## Stage 4b – Transcript Normalization & Structure
 
 ### Purpose:
-Stage 4b (Normalization) takes transcripts and converts them into clean, sentence-per-line files, making them ready for summarization, embedding, or semantic indexing. This step ensures that your text is consistent, readable, and free from filler noise or formatting artifacts.
+Convert transcript text into cleaner, more consistent sentence-per-line or paragraph-preserving output for summarization, embeddings, or semantic search.
 
 ### Input:
-Plain .txt files from previous slicing steps, typically in transcripts_<modlel>/ under the entity data path.
-Custom input directories or individual files via --input-dir.
+Plain `.txt` transcript files, typically derived from Stage 4a and stored under `transcripts_<model>/` or another user-specified input location.
 
 ### Output:
-Cleaned .txt files with one sentence per line, saved under normalized/ in the entity path.
-Optional paragraph preservation or deep cleaning depending on flags.
+Normalized `.txt` files written to `normalized/` under the entity data path, or a user-specified output directory.
 
 ### How it Works:
-Sentence Splitting: Uses spaCy to break text into individual sentences. Can be disabled if you prefer a simple line-by-line approach.
-
-### Text Normalization:
-Collapses repeated characters and phrases.
-Removes filler words and optional bracketed content.
-Corrects punctuation, spacing, and capitalization.
-Preserves numbers, acronyms, and entity names.
-Optional Deep Cleaning: Removes noise that may interfere with embeddings or AI summarization.
-
-### Paragraph Preservation: Maintains paragraph structure if needed for context-sensitive tasks.
-Config Overrides: Entity-specific replacements cascade from global + local TOML configs for deterministic results.
+YATSEE loads the merged configuration, resolves normalization preferences, and cleans transcript text using sentence splitting and replacement rules. spaCy can be used for sentence-aware processing, or disabled when a simpler line-preserving workflow is preferred. Normalization can include punctuation cleanup, filler reduction, spacing cleanup, and application of configured replacements. Optional deep cleaning or paragraph preservation modes support different downstream use cases.
 
 ### Why This Stage Matters:
-Produces high-quality, AI-ready text without the clutter from raw transcripts.
-Ensures embeddings, semantic search, or summarization tasks work reliably.
-Provides consistent outputs across different entities and runs.
-Flexible: choose light cleaning, deep cleaning, or paragraph-preserving workflows depending on your use case.
+- Produces cleaner text for LLM summarization and retrieval workflows.
+- Reduces ASR clutter and recurring transcription artifacts.
+- Applies entity-specific replacements consistently across runs.
+- Gives downstream consumers a more stable and usable text artifact than raw transcript output.
 
-### User Options / Argparse Flags:
--e / --entity: Entity handle to process.  
--c / --config: Global configuration path (yatsee.toml).  
--i / --input-dir: Input file or directory.  
--o / --output-dir: Directory to save normalized files.  
--m / --model: spaCy model to use (en_core_web_md, etc.).  
---no-spacy: Disable spaCy sentence splitting.  
---force: Overwrite existing files.  
---deep-clean: Enable advanced cleaning of filler content and formatting noise.  
---preserve-paragraphs: Keep paragraph breaks intact.
+### User Options / CLI Flags:
+- `-e` / `--entity`: Entity handle to process.
+- `-c` / `--config`: Global configuration path. Default: `yatsee.toml`.
+- `-i` / `--input-path`: Input file or directory.
+- `-o` / `--output-dir`: Directory to save normalized files.
+- `-m` / `--model`: Transcription model suffix override for input path resolution.
+- `--no-spacy`: Disable spaCy sentence splitting.
+- `--deep-clean`: Enable more aggressive cleanup.
+- `--preserve-paragraphs`: Preserve paragraph structure.
+- `--force`: Overwrite existing outputs.
 
 ### Usage Examples:
-python yatsee_normalize_structure.py -e defined_entity  
-python yatsee_normalize_structure.py --input-dir ./normalized --output-dir ./normalized_out  
-python yatsee_normalize_structure.py -i ./normalized/file.txt --deep-clean  
-python yatsee_normalize_structure.py -e entity_handle --no-spacy --preserve-paragraphs
+```bash
+yatsee transcript normalize --entity example_entity
+yatsee transcript normalize --input-path ./transcripts_small --output-dir ./normalized_out
+yatsee transcript normalize --input-path ./transcripts_small/file.txt --deep-clean
+yatsee transcript normalize --entity example_entity --no-spacy --preserve-paragraphs
+```
 
 ### Design Notes:
-Modular functions handle config loading, file discovery, sentence splitting, cleaning, and writing outputs.
-Deterministic outputs allow repeated runs without accidental divergence.
-Fully local; no cloud dependencies required.
-Supports light or heavy cleaning depending on downstream AI tasks.
+- This stage is about text quality and consistency, not semantic interpretation.
+- Replacement rules from configuration are often as important as model quality for clean downstream output.
+- It supports both lighter cleanup and heavier cleanup depending on the next consumer.
 
 ---
 
-## Stage 5 – Summarization & Multi-Pass Processing
+## Stage 5 – Intelligence, Summarization & Provider-Based LLM Processing
 
 ### Purpose:
-Stage 5 takes normalized transcripts and produces structured, high-level summaries of meetings, including city councils, committees, town halls, or any spoken-word civic events. This stage uses a local LLM via Ollama, keeping all intermediate chunk summaries in memory for privacy and performance.
+Generate structured summaries and other higher-level intelligence artifacts from transcript text using a configurable provider layer rather than a single hardcoded model runtime.
 
 ### Input:
-Single transcript file or a directory of .txt files (output of Stage 4b).
-Optional human-readable context (--context) to guide summarization.
-Local Ollama models (e.g., llama3, mistral, gemma) pulled via ollama pull.
+Single transcript file or a directory of `.txt` files, typically from normalized transcript output or another prepared text source. Optional human-readable context, prompt configuration, provider selection, provider security settings, and pricing-reference configuration may also be supplied.
 
 ### Output:
-Final merged summary written to --output-dir (default: ./summary/).
-Supports Markdown (default) or YAML format.
-Intermediate chunk summaries exist in memory only and are not written to disk unless debugging flags are used.
+Final summaries written to the configured or specified output directory, typically in Markdown and optionally YAML. Optional intermediate chunk summaries can also be written for debugging.
 
 ### How it Works:
-Automatic Meeting Classification:
-Determines meeting type using transcript content and optional filename hints.
-Selects prompt workflows dynamically based on type (overview, action items, detailed, etc.).
+YATSEE classifies transcript content when appropriate, resolves prompt routing, and processes transcripts through a multi-pass summarization workflow. Transcripts are chunked based on word, sentence, or density-aware strategies depending on configuration and input size. Chunk-level summaries are refined across passes until a final structured report is produced.
 
-### Multi-Pass Summarization:
-Summarization happens in iterative passes (--max-pass) for context depth.
-Users can override auto-classification and supply manual prompts for each pass.
-Chunking of transcripts can be done by word, sentence, or density, depending on desired granularity.
+The intelligence stage now uses a provider abstraction. That means YATSEE can generate text through multiple backends, including local runtimes and hosted APIs, without changing the summarization workflow itself.
 
-### Prompt Modularity:
-Different prompt types for different summary styles:
-overview, action_items, detailed, more_detailed, most_detailed, final_pass_detailed.
-Dynamic selection allows LLM to adapt output based on meeting type.
-Optional manual overrides for full control (--first-prompt, --second-prompt, --final-prompt).
+Supported provider patterns currently include:
+- local HTTP runtimes such as Ollama
+- local OpenAI-compatible runtimes such as llama.cpp
+- hosted APIs such as OpenAI and Anthropic
+- CLI-backed providers such as `codex_cli`
 
-### Memory-First Design:
-Prioritizes local computation and privacy.
-Handles long transcripts via in-memory chunking and automatic merging.
+YATSEE also applies provider-target hardening before execution. That means local-first provider choices remain the default posture unless you explicitly relax those controls in configuration.
 
-### Structured Civic Focus:
-Extracts motions, votes, decisions, speaker intent, and other civic-specific elements.
-Maintains gender-neutral and consistent summary style for all outputs.
+YATSEE can also optionally calculate reference pricing for a run. This is useful when the actual work is performed locally but you want to estimate what the same token volume would have cost on a hosted provider.
 
-### User Options / Argparse Flags:
--e / --entity: Entity handle to process.  
--c / --config: Path to global yatsee.toml.  
--i / --txt-input: Transcript file or directory to summarize.  
--o / --output-dir: Directory for final summaries (default: summary/).  
--m / --model: Local Ollama model (e.g., llama3:latest, mistral:latest).  
--f / --output-format: Output format (markdown default, or yaml).  
--j / --job-type: Defines prompt workflow (summary default, research optional).  
--s / --chunk-style: Chunking method (word, sentence, density).  
--w / --max-words: Word threshold per chunk (default 3500).  
--t / --max-tokens: Approximate max tokens per chunk (overrides --max-words).  
--p / --max-pass: Maximum summarization iterations (default 3).  
--d / --disable-auto-classification: Turn off auto prompt selection; manual prompts required.  
---first-prompt, --second-prompt, --final-prompt: Manual prompt overrides per pass.  
---context: Optional meeting context to guide summarization.  
---print-prompts: Display all prompt templates and exit.  
---enable-chunk-writer: Write intermediate chunks to disk for debugging.  
+### Why This Stage Matters:
+- Converts long-form transcripts into usable high-level artifacts.
+- Preserves important civic details such as motions, votes, decisions, and follow-up items.
+- Supports multiple prompt workflows without changing core pipeline structure.
+- Decouples summarization logic from any single model runtime.
+- Makes local-vs-hosted cost comparison possible without changing actual execution.
+
+### Provider Security Defaults:
+By default, YATSEE keeps the provider layer locked down unless you explicitly opt in through config.
+
+That means:
+- remote non-local targets for local HTTP providers are blocked unless `llm_allow_remote = true`
+- insecure HTTP for hosted providers is blocked unless `llm_allow_insecure_http = true`
+- custom CLI executable targets are blocked unless `llm_allow_custom_executable = true`
+
+If those settings are omitted from config, YATSEE still behaves as if they are `false`.
+
+### User Options / CLI Flags:
+- `-e` / `--entity`: Entity handle to process.
+- `-c` / `--config`: Path to global `yatsee.toml`.
+- `-i` / `--txt-input`: Transcript file or directory to summarize.
+- `-o` / `--output-dir`: Directory for final summaries.
+- `-m` / `--model`: LLM model override.
+- `--llm-provider`: Provider override such as `ollama`, `llamacpp`, `openai`, `anthropic`, or `codex_cli`.
+- `--llm-provider-url`: Provider URL or executable target override.
+- `--llm-api-key`: Provider API key override.
+- `--show-pricing`: Enable reference pricing for the run.
+- `--no-show-pricing`: Disable reference pricing even if enabled in config.
+- `--pricing-provider`: Reference provider used for pricing estimation.
+- `--pricing-model`: Reference model used for pricing estimation.
+- `-f` / `--output-format`: Output format, either `markdown` or `yaml`. Default: `markdown`.
+- `-j` / `--job-profile`: Prompt workflow, either `civic` or `research`. Default: `civic`.
+- `-s` / `--chunk-style`: Chunking method, one of `word`, `sentence`, or `density`. Default: `word`.
+- `-w` / `--max-words`: Approximate word threshold per chunk.
+- `-t` / `--max-tokens`: Approximate token threshold per chunk.
+- `-p` / `--max-pass`: Maximum number of summarization passes. Default: `3`.
+- `-d` / `--disable-auto-classification`: Disable automatic prompt routing.
+- `--first-prompt`, `--second-prompt`, `--final-prompt`: Manual prompt overrides.
+- `--context`: Optional context to guide summarization.
+- `--print-prompts`: Display resolved prompts and exit.
+- `--enable-chunk-writer`: Write intermediate chunk outputs for debugging.
 
 ### Usage Examples:
-python yatsee_summarize_transcripts.py -e defined_entity  
-python yatsee_summarize_transcripts.py --model llama3 -i council_meeting_2025_06_01 --context "City Council - June 2025"  
-python yatsee_summarize_transcripts.py --model mistral -i firehall_meeting_2025_05 --context "Fire Hall Proposal Discussion" --output-format markdown  
-python yatsee_summarize_transcripts.py --model gemma -i finance_committee_2025_05 --disable-auto-classification --first-prompt overview --second-prompt detailed --final-prompt final_pass_detailed
+```bash
+yatsee intel run -e example_entity
+
+yatsee intel run -e example_entity --model llama3:latest --llm-provider ollama --llm-provider-url http://localhost:11434
+
+yatsee intel run --txt-input council_meeting_2025_06_01.txt --context "City Council - June 2025" --model mistral-nemo:latest --llm-provider llamacpp --llm-provider-url http://localhost:8080
+
+yatsee intel run --txt-input finance_committee_2025_05.txt --llm-provider codex_cli --llm-provider-url codex --model gpt-5.4 --show-pricing --pricing-provider openai --pricing-model gpt-5.4
+
+yatsee intel run --txt-input firehall_meeting_2025_05.txt --llm-provider anthropic --llm-provider-url https://api.anthropic.com --llm-api-key "$ANTHROPIC_API_KEY" --model claude-opus-4.1
+```
 
 ### Design Notes:
-Modular functions handle config, chunking, prompt selection, and multi-pass summarization.
-In-memory workflow ensures fast processing without polluting disk storage.
-Designed to extract structured civic intelligence while remaining flexible for manual overrides or custom prompts.
-Fully local, no cloud APIs required, supporting privacy-sensitive use cases.
-
----
-
-## Optional Utilities (YATSEE Sound Recorder)
-
-A lightweight, cross-platform utility for real-time audio capture of meetings. Designed to integrate seamlessly with the YATSEE pipeline, it produces high-fidelity FLAC files while preserving every word spoken.
-
-### System Requirements:
-Windows 10/11, macOS, or Linux
-Python 3.10+ with libraries: customtkinter, sounddevice, soundfile, numpy
-
-### OS-Level Microphone Tips:
-Background hiss often comes from analog gain or mic boost. Keep "Mic Boost" / "Input Boost" at 0.0 dB for clean recordings.
-Defaults to 24-bit recording for maximum digital headroom.
-Windows-Specific Notes (Shure MV7 / USB mics):
-Enable "Allow desktop apps to access your microphone" in Privacy settings.
-For stability, select the device ending in (WASAPI).
-Disable "Allow applications to take exclusive control" if recording fails.
-Auto-Level in Shure MOTIV software is recommended for variable speaker distances.
-
-### Production Deployment:
-To bundle as a standalone executable:
-
-pip install pyinstaller  
-pyinstaller --noconsole --onefile yatsee_sound_recorder.py
-
-### Key Features:
-Threaded Queue: Ensures continuous audio capture without gaps.
-Real-time Disk Write: Streams directly to disk to prevent data loss.
-Modern Folder Picker: Dark-mode browser bypassing legacy dialogs.
-FLAC Encoding: Lossless audio at ~50% the file size of WAV.
-
-### Potential Future Features:
-Silence detection to skip writing empty audio.
-Voice-triggered start/stop via offline hotwords.
-Rolling buffer to capture audio before triggers.
-Expandable voice commands (save, discard, rename clips).
+- Summarization is intentionally multi-pass because long civic transcripts routinely exceed comfortable single-pass context windows.
+- Prompt orchestration, provider execution, pricing estimation, chunking, and output writing are separate concerns internally.
+- This stage is designed to extract durable, structured intelligence rather than produce a generic free-form recap.
+- Reference pricing is only an estimate. It depends on the configured pricing table and estimated token counts unless exact provider usage metadata is available.
+- Provider hardening settings are intentionally config-driven rather than casually exposed as one-run CLI switches.

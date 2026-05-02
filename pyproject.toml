@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yatsee"
+version = "0.1.0"
+description = "Yet Another Tool for Speech Extraction & Enrichment"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-only" }
+authors = [
+  { name = "Alias454" }
+]
+dependencies = [
+  "toml~=0.10.2",
+  "tomlkit~=0.11.8",
+  "yt-dlp>=2026.3.17",
+  "yt-dlp-ejs~=0.8.0",
+  "torch<=2.7.1",
+  "torchaudio<=2.7.1",
+  "tqdm<=4.67.1",
+  "openai-whisper==20250625",
+]
+
+[project.optional-dependencies]
+faster = [
+  "faster-whisper==1.2.1",
+]
+
+transcript = [
+  "webvtt-py~=0.5.1",
+  "spacy>=3.8.14",
+  "sentence-transformers~=4.1.0",
+]
+
+intelligence = [
+  "PyYAML~=6.0.2",
+  "requests~=2.32.4",
+  "mdformat~=1.0.0",
+]
+
+llamacpp = [
+  "llama-cpp-python[server]",
+]
+
+index = [
+  "chromadb>=1.5.7",
+  "sentence-transformers~=4.1.0",
+  "scikit-learn~=1.8.0",
+]
+
+ui = [
+  "streamlit>=1.56.0",
+]
+
+full = [
+  "faster-whisper==1.2.1",
+  "webvtt-py~=0.5.1",
+  "spacy>=3.8.14",
+  "sentence-transformers~=4.1.0",
+  "PyYAML~=6.0.2",
+  "requests~=2.32.4",
+  "mdformat~=1.0.0",
+  "llama-cpp-python[server]",
+  "chromadb>=1.5.7",
+  "scikit-learn~=1.8.0",
+  "streamlit>=1.56.0",
+]
+
+[project.scripts]
+yatsee = "yatsee.cli.main:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

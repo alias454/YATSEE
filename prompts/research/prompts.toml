@@ -1,0 +1,228 @@
+# =========================
+# YATSEE Prompt Routing Rules
+# =========================
+# Map the prompt name to the summariy pass
+[prompt_router]
+city_council = {first = "facts", multi = "most_detailed", final = "final_pass_detailed"}
+finance_committee = { first = "facts", multi = "most_detailed", final = "final_pass_detailed" }
+committee_of_the_whole = { first = "facts", multi = "most_detailed", final = "final_pass_detailed" }
+zoning_committee = { first = "facts", multi = "most_detailed", final = "final_pass_detailed" }
+general = { first = "facts", multi = "most_detailed", final = "final_pass_detailed" }
+
+# =========================
+# YATSEE Classifier Allowed Types
+# =========================
+[classifier_types]
+allowed = [
+    "city_council",
+    "finance_committee",
+    "committee_of_the_whole",
+    "zoning_committee",
+    "general"
+]
+
+# =========================
+# YATSEE Classifier Prompt
+# =========================
+[classifier_prompt]
+text = """
+You are a routing assistant. Classify this research meeting to select the correct summary template.
+
+Context: {context}
+
+Transcript Snippet:
+{text}
+
+Classify as one of: city_council, finance_committee, committee_of_the_whole, zoning_committee, general
+
+Analysis Rules:
+1. Finance mentions → finance_committee
+2. Committee of the Whole → committee_of_the_whole
+3. Zoning/Planning → zoning_committee
+4. Regular council → city_council
+5. Anything else → general
+
+Return only the classification value as plain text.
+"""
+
+
+# =========================
+# YATSEE Prompt Templates
+# =========================
+[prompts.facts]
+text = """
+You are an assistant producing structured meeting extractions of verifiable facts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Definition of a fact:
+A fact is any statement that is explicitly stated in the transcript and can be verified within the meeting context.
+
+Facts include:
+- Motions, votes, and their outcomes
+- Budget approvals, amounts, or funding commitments
+- Contracts, leases, or legal agreements
+- Appointments, hirings, or official roles
+- Policy decisions or formal statements by officials
+- Deadlines, dates, or schedule announcements
+- Project updates with measurable or financial details
+
+A fact must be atomic: one idea per fact. Do not infer intent, opinion, or speculation.
+
+Your task:
+Extract facts from the raw transcript snippet. Each fact must be atomic: one idea per fact. Repeat context if multiple facts occur there.
+
+Rules:
+- Do NOT summarize, infer intent, or explain.
+- Output strictly valid JSON only.
+- Assign a confidence level (high, medium, low) for each fact based on how clearly it is stated in the transcript.
+- Preserve numeric values, dates, and proper names exactly.
+- Include agenda item number or discussion section when available.
+- Use they/them pronouns unless gender is explicit.
+- Include speaker names only if explicitly stated or positively supported from context.
+- Do not include meta-commentary, task acknowledgements, or conversational filler.
+
+Output format:
+Return a JSON array of objects with this exact structure:
+
+{{
+  "fact": "<complete factual statement>",
+  "category": "<motion | vote | budget | contract | appointment | policy | statement | other>",
+  "speaker": "<name or role if known, otherwise null>",
+  "context": "<agenda item, discussion topic, or short phrase describing location within the meeting>",
+  "confidence": "<high | medium | low>"
+}}
+
+If no factual statements are present, return an empty array: []
+"""
+
+[prompts.action_items]
+text = """
+You are an assistant producing structured meeting minutes from transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Extract actionable content: motions, decisions, follow-ups, assigned tasks.
+- Exclude commentary or informal remarks.
+- Omit empty sections.
+- Avoid repeating headers.
+- Use **bold headers** for major topics.
+- Use **plain Arabic numerals** for numbered items.
+- Use they/them pronouns unless gender is explicit.
+"""
+
+[prompts.roll_call_only]
+text = """
+You are an assistant producing structured meeting minutes from transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Extract attendance information only.
+- List Present and Absent names.
+- Infer attendance if roll call not read.
+- Exclude titles unless clarity is required.
+- Skip irrelevant commentary.
+- Use **bold headers** for attendance sections.
+- Use **plain Arabic numerals** for any numbered items.
+"""
+
+[prompts.vote_log_only]
+text = """
+You are an assistant producing structured meeting minutes from transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- List all motions and votes.
+- Format: 'Motion to [action], made by [name], seconded by [name] – Passed [X–Y]'.
+- Include individual votes if roll call taken.
+- Skip unrelated procedural commentary.
+- Omit empty sections.
+- Avoid repeating headers.
+- Use **bold headers** for motion/vote sections.
+- Use **plain Arabic numerals** for numbered lists.
+"""
+
+[prompts.overview]
+text = """
+You are an assistant producing structured research meeting summaries from transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Produce a concise, high-level summary.
+- Group related topics.
+- Exclude non-substantive sections.
+- Use they/them pronouns unless gender is explicit.
+- Use plain numbers, not Roman numerals.
+"""
+
+[prompts.action_items]
+text = """
+You are an assistant producing structured research meeting summaries.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Extract actionable items only:
+- Include motions, decisions, follow-ups, and assignments.
+- Exclude commentary, informal remarks, and empty sections.
+- Avoid repeating headers.
+- Use they/them pronouns unless gender is explicit.
+- Use plain numbers, not Roman numerals.
+"""
+
+[prompts.most_detailed]
+text = """
+You are an assistant producing detailed, structured summaries from research meeting transcripts.
+
+Context: {context}
+
+Transcript:
+{text}
+
+Instructions:
+- Summarize all topics, discussions, and decisions.
+- Include motions, votes, approvals, and any follow-ups.
+- Preserve attribution when names/titles are clearly stated.
+- Group content under clear topical headers.
+- Exclude empty/non-substantive sections.
+- Avoid repeating headers (attendees, location, date).
+- Use plain numbers instead of Roman numerals.
+"""
+
+[prompts.final_pass_detailed]
+text = """
+You are an assistant synthesizing research meeting summaries into a unified, readable markdown report.
+
+Context: {context}
+
+Summaries:
+{text}
+
+Instructions:
+- Combine all chunked summaries into a cohesive markdown file by topic.
+- Retain motions, vote outcomes, and any follow-ups.
+- Preserve topic order and discussion flow.
+- Omit empty sections entirely.
+- Keep markdown clean and readable.
+- Avoid meta-commentary or filler text; output only factual summaries.
+"""
