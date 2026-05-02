@@ -53,7 +53,7 @@ Required or commonly needed tools:
 ### Clone the repository
 
 ```bash
-git clone https://github.com/alias454/yatsee.git
+git clone https://github.com/YATSEE-Labs/YATSEE.git
 cd yatsee
 ```
 
