@@ -1,18 +1,18 @@
-# YATSEE Audio Transcription Pipeline
+# YATSEE Audio Extraction Pipeline
+
+## Yet Another Tool for Speech Extraction & Enrichment
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 
-**YATSEE** -- Yet Another Tool for Speech Extraction & Enrichment
+YATSEE is a local-first, end-to-end data pipeline designed to systematically refine raw meeting audio into clean, searchable, and auditable intelligence. It automates the tedious work of downloading, transcribing, normalizing, and generating higher-level intelligence from unstructured conversations.
 
-YATSEE is a local-first, end-to-end data pipeline designed to systematically refine raw meeting audio into clean, searchable, and auditable intelligence. It automates the tedious work of downloading, transcribing, and normalizing unstructured conversations.
-
-This is a local-first, privacy-respecting toolkit for anyone who wants to turn public noise into actionable intelligence.
+This is a local-first, privacy-respecting toolkit for anyone who wants to turn public noise into actionable intelligence. Local runtimes are the default and preferred path, while optional external providers are supported when needed.
 
 ## Why This Exists
 
 Public records are often public in name only. Civic business is frequently buried in four-hour livestreams and jargon-filled transcripts that are technically accessible but functionally opaque. The barrier to entry for an interested citizen is hours of time and dealing with complex jargon.
 
-YATSEE solves that by using a carefully tuned local LLM to transform that wall of text into a high-signal summary. YATSEE can be set to extract specific votes, contracts, and policy debates that allow you to find what you are interested in fast. It's a tool for creating clarity and accountability that modern civic discourse requires.
+YATSEE solves that by using a carefully tuned local-first LLM workflow to transform that wall of text into a high-signal summary. YATSEE can be set to extract specific votes, contracts, and policy debates that allow you to find what you are interested in fast. It's a tool for creating clarity and accountability that modern civic discourse requires.
 
 ## Demo
 
@@ -25,203 +25,263 @@ YATSEE solves that by using a carefully tuned local LLM to transform that wall o
  - [YATSEE Configuration Guide](./docs/yatsee_config_guide.md)
  - [YATSEE User Guide](./docs/yatsee_user_guide.md)
  - [YATSEE Prompt Orchestration](./docs/yatsee_prompt_orchestration.md)
-
-All modules are fully documented using standard Python docstrings.
-
-To browse module documentation use `pydoc` locally:
-
-```bash
-pydoc ./yatsee_summarize_transcripts.py
-```
+ - [YATSEE Troubleshooting](./docs/yatsee_troubleshooting.md)
 
 ---
 
-## 🚀 Quick Start (Plug-and-Play)
+## Command families
 
-Follow these steps to get YATSEE running.
+YATSEE provides these primary command families:
 
----
+- `yatsee config ...`
+- `yatsee source fetch ...`
+- `yatsee audio format ...`
+- `yatsee audio transcribe ...`
+- `yatsee transcript slice ...`
+- `yatsee transcript normalize ...`
+- `yatsee intel run ...`
 
-### 1. **Clone the Repository**
+## Installation
+
+### System tools
+
+Required or commonly needed tools:
+
+- `ffmpeg`
+- `yt-dlp` for source fetching workflows
+
+### Clone the repository
+
 ```bash
 git clone https://github.com/alias454/yatsee.git
 cd yatsee
 ```
 
----
+### Bootstrap a local environment
 
-### 2. **Edit Initial Configuration**
+Linux/macOS:
+
 ```bash
-# Copy the template to create your local config file
-cp yatsee.conf yatsee.toml
+./scripts/setup.sh
 ```
-- Open `yatsee.toml` in any text editor.
-- Add at least **one entity** with the required fields:
-  - `entity` (unique identifier)
 
----
+Windows PowerShell:
 
-### 3. **Run the Setup Script**
-```bash
-chmod +x setup.sh
-./setup.sh
+```powershell
+.\scripts\setup.ps1
 ```
-- Installs Python dependencies
-- Downloads NLP models (`spaCy`, etc.)
-- Checks for GPU (CUDA/MPS) and warns if only CPU is available
 
----
+These setup scripts are convenience helpers for local development.
 
-### 4. **Activate the Python Environment**
+### Install directly from `pyproject.toml`
+
+Create and activate a virtual environment.
+
+#### Linux / macOS
+
 ```bash
+python3 -m venv .venv
 source .venv/bin/activate
 ```
-> Python ≥3.10 recommended. CPU works, but GPU/MPS accelerates transcription.
 
----
+#### Windows PowerShell
 
-### 5. **Run the Config Builder**
-```bash
-python yatsee_build_config.py --create
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 ```
-- Uses the entity info in `yatsee.toml` to:
-  - Create the main directory(default ./data) for the pipeline
-  - Initialize per-entity pipeline configs
-  - `sources.youtube.youtube_path` (YouTube channel/playlist)
-  - Any optional data structures like titles, people, replacements etc.
-- This is the **minimum viable entity** needed for the downloader.
-- **Important:** Run this after `setup.sh` and after adding at least one entity.
 
----
+Install the package in editable mode:
 
-### 6. **Run the Processing Pipeline**
 ```bash
-see Script Summary below
+pip install --upgrade pip
+pip install -e .
 ```
-- Processes audio/video in `downloads/`
-- Converts to `.flac`/`.wav` in `audio/`
-- Generates transcripts, normalizes text, and produces summaries
-- All scripts are modular: you can run them individually or as a pipeline
 
----
+Install common optional functionality:
 
-### 7. **Launch the Demo Search UI**
 ```bash
-streamlit run yatsee_search_demo.py -- -e entity_name_configured
+pip install -e .[full]
 ```
-- Provides semantic and structured search over transcripts and summaries
 
----
+Or install only the extra sets you need:
 
-### ⚠️ Notes for New Users
-- `entity` is a unique key identifier for all scripts. Keep it consistent.
-- Each pipeline stage ensures directories exist for output; do **not** manually create them.
-- Optional: You can edit additional pipeline settings (like per-entity hotwords or divisions) in the generated config.
-
----
+```bash
+pip install -e .[transcript]
+pip install -e .[intelligence]
+pip install -e .[llamacpp]
+pip install -e .[index]
+pip install -e .[ui]
+```
 
 ## Requirements
 
-This pipeline was developed and tested on the following setup:
-  - **CPU:** Intel Core i7-10750H (6 cores / 12 threads, up to 5.0 GHz)
-  - **RAM:** 32 GB DDR4
-  - **GPU:** NVIDIA GeForce RTX 2060 (6 GB VRAM, CUDA 12.8)
-  - **Storage:** NVMe SSD
-  - **OS:** Fedora Linux
-  - **Shell:** Bash
-  - **Python:** 3.10 or newer
+### Minimum system requirements
 
-Additional testing was performed on Apple Silicon (macOS):
-  - **Model:** Mac Mini (M4 Base)
-  - **CPU:** Apple M4 (10 cores / 4 performance cores, up to 120GB/s memory bandwidth)
-  - **RAM:** 16 GB
-  - **Storage:** NVMe SSD
-  - **OS:** macOS Sonoma / Sequoia
-  - **Shell:** ZSH
-  - **Python:** 3.9 or newer
+YATSEE can run on modest local hardware, but a baseline system is still required.
 
-GPU acceleration was enabled for Whisper / faster-whisper using CUDA 12.8 and NVIDIA driver 570.144 on Linux. However, faster whisper has limited/no support for mps.
+Minimum practical requirements:
 
-Note: Audio transcription was much slower on the MAC than on Linux. it's doable but it's much slower.
+- **CPU:** modern 64-bit multi-core processor
+- **RAM:** 16 GB recommended
+- **Storage:** sufficient free disk space for source media, intermediate audio, transcripts, and derived artifacts
+- **Python:** 3.11 or newer
+- **OS:** Linux or macOS recommended
+- **Required tools:** `ffmpeg`
+- **Optional tools:** `yt-dlp` for source fetching workflows
 
-Note: The pipeline works on CPU-only systems without a GPU. However, transcription (especially with Whisper or faster-whisper) will be much slower compared to systems with CUDA-enabled GPU acceleration or MPS.
+A GPU is **not required**, but some stages, especially transcription, may be substantially slower on CPU-only systems.
 
-> ⚠️ Not tested on Windows. Use at your own risk on `Windows` platforms.
+### Tested systems
 
----
-Manual Installation (If not using setup.sh)
+The pipeline was developed and tested on the following Linux system:
 
-If you cannot use the setup script, ensure you have `ffmpeg` and `yt-dlp` installed via your package manager, then install the Python requirements:
+- **CPU:** Intel Core i7-10750H (6 cores / 12 threads, up to 5.0 GHz)
+- **RAM:** 32 GB DDR4
+- **GPU:** NVIDIA GeForce RTX 2060 (6 GB VRAM, CUDA 12.8)
+- **Storage:** NVMe SSD
+- **OS:** Fedora Linux
+- **Shell:** Bash
+- **Python:** 3.11 or newer
 
-### Required CLI Tools
+Additional testing was performed on Apple Silicon:
 
-- `yt-dlp` – Download livestream audio from YouTube
-- `ffmpeg` – Convert audio to `.flac` or `.wav` format
+- **Model:** Mac Mini (M4 Base)
+- **CPU:** Apple M4 (10 cores / 4 performance cores, up to 120 GB/s memory bandwidth)
+- **RAM:** 16 GB
+- **Storage:** NVMe SSD
+- **OS:** macOS Sonoma / Sequoia
+- **Shell:** ZSH
+- **Python:** 3.11 or newer
 
-### Required Python Packages
+### Performance notes
 
-- `toml`             Needed for reading the toml config
-- `requests`         Needed for interacting with ollama API if installed
-- `torch`            Required for Whisper and model inference (with or without CUDA)
-- `pyyaml`           YAML output support (for summaries)
-- `whisper`          Audio transcription (standard)
-- `spacy`            Sentence segmentation + text cleanup
-  - Model: en_core_web_sm (or larger)
+- GPU acceleration was used for Whisper / faster-whisper on Linux with CUDA 12.8 and NVIDIA driver 570.144.
+- CPU-only operation is supported, but transcription will be substantially slower.
+- Apple Silicon is viable, but transcription performance was notably slower than the tested Linux CUDA system.
+- `faster-whisper` has limited or no practical MPS support in some environments, so Apple Silicon paths may fall back to CPU behavior depending on setup.
 
-### Optional:
+> Windows support is not a primary tested platform at this time.
 
-- `faster-whisper`   Audio transcription (optional)
+## Quick start
 
-### Optional: Summarization with Local LLM
+### 1. Create a local runtime config
 
-  - ollama  Run local LLMs for summarization
+`yatsee.conf` is the configuration template. Copy it to `yatsee.toml` to create your local runtime config, then edit `yatsee.toml` for your environment and entities.
 
----
-
-## Setup
-
-### Install ffmpeg for your platform
-
-macOS (Homebrew):
 ```bash
-brew install ffmpeg
+cp yatsee.conf yatsee.toml
 ```
 
-Fedora:
+Edit `yatsee.toml` and define at least one entity such as `example_entity`.
+
+For the intelligence stage, set at least:
+
+- `llm_provider`
+- `llm_provider_url`
+
+Optional provider and pricing settings include:
+
+- `llm_api_key`
+- `show_pricing`
+- `pricing_provider`
+- `pricing_model`
+
+Optional provider hardening settings include:
+
+- `llm_allow_remote`
+- `llm_allow_insecure_http`
+- `llm_allow_custom_executable`
+
+If omitted, these hardening settings default to safe behavior.
+
+### 2. Inspect the CLI
+
 ```bash
-sudo dnf install ffmpeg
+yatsee --help
+yatsee config --help
 ```
 
-Debian/Ubuntu:
+If the console script is not yet available in your environment, use:
+
 ```bash
-sudo apt-get update
-sudo apt-get install ffmpeg
+python -m yatsee.cli.main --help
 ```
 
-### Install Python Packages
+### 3. Validate configuration
 
-You can use pip to install the core requirements:
-
-Install:
 ```bash
-pip install -r requirements.txt
-python -m spacy download en_core_web_sm
+yatsee config entity list
+yatsee config validate
+yatsee config resolve --entity example_entity
 ```
 
-### Whisper/faster-whisper
+### 4. Fetch source media
 
-On first run, it will download a model (e.g., base, medium). Ensure you have enough RAM.
-
-### Install ollama(Optional)
-
-Used for generating markdown or YAML summaries from transcripts.
-
-install:
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh
+yatsee source fetch -e example_entity --make-playlist
 ```
 
-See https://ollama.com for supported models and system requirements.
+### 5. Process later stages as needed
+
+```bash
+yatsee audio format --entity example_entity --dry-run
+yatsee audio transcribe --entity example_entity
+yatsee transcript slice --entity example_entity
+yatsee transcript normalize --entity example_entity
+yatsee intel run -e example_entity --print-prompts
+```
+
+### 6. Run the intelligence stage
+
+Local-first default example:
+
+```bash
+yatsee intel run -e example_entity --model llama3:latest --llm-provider ollama --llm-provider-url http://localhost:11434
+```
+
+Alternative provider example:
+
+```bash
+yatsee intel run -e example_entity --model mistral-nemo:latest --llm-provider llamacpp --llm-provider-url http://localhost:8080
+```
+
+## Pipeline model
+
+At a high level, YATSEE processes recordings through staged boundaries:
+
+1. source acquisition
+2. audio formatting
+3. transcription
+4. transcript slicing
+5. transcript normalization
+6. higher-level intelligence and summarization
+
+The broader workflow can also support embeddings and semantic retrieval over the resulting artifacts.
+
+## Configuration model
+
+YATSEE follows a layered configuration strategy:
+
+1. load global `yatsee.toml`
+2. load entity-local `config.toml`
+3. merge entity-local settings over global defaults
+4. cache merged config in memory
+5. resolve stage behavior from the merged result
+
+This configuration pattern is central to the system design.
+
+For intelligence-stage providers, YATSEE also applies a small security policy layer by default:
+
+- remote non-local targets for local HTTP providers are blocked unless explicitly allowed
+- insecure HTTP for hosted providers is blocked unless explicitly allowed
+- custom CLI executable targets are blocked unless explicitly allowed
+
+These settings are intentionally config-driven so they take a little more effort to relax.
+
+## Search and indexing
+
+YATSEE can be used alongside indexing and search workflows built on top of its outputs, including normalized transcripts, summaries, and other derived artifacts.
 
 ## License
 
@@ -229,7 +289,7 @@ YATSEE is open-source software licensed under the **GNU Affero General Public Li
 
 ### What this means:
 - **Freedom:** You are free to use, modify, and distribute this software.
-- **Open Source:** If you modify YATSEE and distribute it (or run it as a service over a network), you **must** open-source your modifications under the same AGPLv3 license.
+- **Open Source:** If you modify YATSEE and share it, or let users interact with your modified version over a network, you must provide the corresponding source under the AGPLv3.
 
 **Commercial Licensing:**
 If you wish to use YATSEE in a proprietary product or closed-source commercial environment, please contact admin <at> alias454 <dot> com for a commercial license.
